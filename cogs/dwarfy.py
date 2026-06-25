@@ -35,7 +35,7 @@ from utils.formatting import (
 )
 
 
-LISTING_ID_RE = re.compile(r"^DWF-\d+$", re.IGNORECASE)
+LISTING_ID_RE = re.compile(r"\bDWF\s*[-\u2010-\u2015\u2212]?\s*(\d+)\b", re.IGNORECASE)
 BROWSE_RARITY_CHOICES = [
     app_commands.Choice(name="Common", value="Common"),
     app_commands.Choice(name="Uncommon", value="Uncommon"),
@@ -57,8 +57,22 @@ def _display_name(user: discord.abc.User) -> str:
     return getattr(user, "display_name", user.name)
 
 
+def parse_listing_id(value: str) -> str | None:
+    """Extract and normalize a Dwarfy listing ID from user input.
+
+    Discord users often paste the whole browse line or a smart punctuation
+    variant. This still keeps buying by listing ID only, but makes copy/paste
+    less fussy.
+    """
+    match = LISTING_ID_RE.search(value.strip().strip("`"))
+    if match is None:
+        return None
+    number = int(match.group(1))
+    return f"DWF-{number:05d}"
+
+
 def _valid_listing_id(value: str) -> bool:
-    return bool(LISTING_ID_RE.fullmatch(value.strip()))
+    return parse_listing_id(value) is not None
 
 
 def resolved_listing_name(item_name: str, variant: str | None = None) -> str:
@@ -588,17 +602,18 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             "DWARFY_SHOP_CHANNEL_ID",
         ):
             return
-        if not _valid_listing_id(listing):
+        listing_id = parse_listing_id(listing)
+        if listing_id is None:
             await interaction.response.send_message(
                 "Please inspect by listing ID, like `DWF-00017`.",
                 ephemeral=True,
             )
             return
 
-        row = await self.bot.db.get_listing(listing)
+        row = await self.bot.db.get_listing(listing_id)
         if row is None:
             await interaction.response.send_message(
-                f"I could not find listing `{listing.upper()}`.",
+                f"I could not find listing `{listing_id}`.",
                 ephemeral=True,
             )
             return
@@ -710,17 +725,18 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             "DWARFY_SHOP_CHANNEL_ID",
         ):
             return
-        if not _valid_listing_id(listing):
+        listing_id = parse_listing_id(listing)
+        if listing_id is None:
             await interaction.response.send_message(
                 "Please buy by listing ID only, like `DWF-00017`.",
                 ephemeral=True,
             )
             return
 
-        row = await self.bot.db.get_listing(listing)
+        row = await self.bot.db.get_listing(listing_id)
         if row is None:
             await interaction.response.send_message(
-                f"I could not find listing `{listing.upper()}`.",
+                f"I could not find listing `{listing_id}`.",
                 ephemeral=True,
             )
             return
@@ -812,6 +828,27 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         )
         await send_text_response(interaction, output)
 
+    @buy.autocomplete("listing")
+    async def buy_listing_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        listings = await self.bot.db.list_available_listings()
+        query = current.casefold().strip()
+        choices: list[app_commands.Choice[str]] = []
+        for listing in listings:
+            listing_id = listing["listing_id"]
+            display_name = listing_display_name(listing)
+            label = f"{listing_id} - {display_name} ({listing['rarity']})"
+            searchable = f"{listing_id} {display_name} {listing['rarity']}".casefold()
+            if query and query not in searchable:
+                continue
+            choices.append(app_commands.Choice(name=label[:100], value=listing_id))
+            if len(choices) >= 25:
+                break
+        return choices
+
     @app_commands.command(name="stats", description="Show Dwarfy's inventory and ledger stats.")
     async def stats(self, interaction: discord.Interaction) -> None:
         if not await self._require_admin(interaction):
@@ -846,17 +883,18 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     async def void(self, interaction: discord.Interaction, listing: str, reason: str) -> None:
         if not await self._require_admin(interaction):
             return
-        if not _valid_listing_id(listing):
+        listing_id = parse_listing_id(listing)
+        if listing_id is None:
             await interaction.response.send_message(
                 "Please void by listing ID, like `DWF-00017`.",
                 ephemeral=True,
             )
             return
 
-        row = await self.bot.db.void_listing(listing, reason)
+        row = await self.bot.db.void_listing(listing_id, reason)
         if row is None:
             await interaction.response.send_message(
-                f"I could not find an active listing `{listing.upper()}` to void.",
+                f"I could not find an active listing `{listing_id}` to void.",
                 ephemeral=True,
             )
             return
