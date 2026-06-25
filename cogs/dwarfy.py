@@ -36,6 +36,14 @@ from utils.formatting import (
 
 
 LISTING_ID_RE = re.compile(r"^DWF-\d+$", re.IGNORECASE)
+BROWSE_RARITY_CHOICES = [
+    app_commands.Choice(name="Common", value="Common"),
+    app_commands.Choice(name="Uncommon", value="Uncommon"),
+    app_commands.Choice(name="Rare", value="Rare"),
+    app_commands.Choice(name="Very Rare", value="Very Rare"),
+    app_commands.Choice(name="Legendary", value="Legendary"),
+]
+BROWSE_RARITY_VALUES = {choice.value for choice in BROWSE_RARITY_CHOICES}
 
 DISASTER_MESSAGES = [
     "The broker never returns. The rented desk is empty, the references were false, and the item is unrecoverable.",
@@ -486,6 +494,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         max_price="Only show listings whose maximum possible final price is this amount or lower.",
         search="Search item name, source, category, or tags.",
     )
+    @app_commands.choices(rarity=BROWSE_RARITY_CHOICES)
     async def browse(
         self,
         interaction: discord.Interaction,
@@ -508,6 +517,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         listings = await self.bot.db.list_available_listings()
         rarity_filter = normalize_rarity(rarity) if rarity else None
+        if rarity_filter and rarity_filter not in BROWSE_RARITY_VALUES:
+            await interaction.response.send_message(
+                "Choose one of the supported rarity filters: Common, Uncommon, Rare, Very Rare, or Legendary.",
+                ephemeral=True,
+            )
+            return
         search_filter = search.casefold().strip() if search else None
 
         filtered: list[tuple[dict[str, Any], int, int]] = []
