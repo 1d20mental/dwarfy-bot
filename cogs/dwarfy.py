@@ -18,7 +18,14 @@ from services.pricing import (
     roll_buy_price,
     roll_sell_price,
 )
-from services.sheets import format_item_choices, normalize_rarity
+from services.sheets import (
+    format_item_choices,
+    is_generic_template_item,
+    item_detail_summary,
+    looks_like_pasted_detail_text,
+    looks_like_pasted_item_text,
+    normalize_rarity,
+)
 from utils.formatting import (
     character_label,
     gp,
@@ -46,12 +53,30 @@ def _valid_listing_id(value: str) -> bool:
     return bool(LISTING_ID_RE.fullmatch(value.strip()))
 
 
-def resolved_listing_name(item_name: str, details: str | None = None) -> str:
-    """Return the player-facing listing name, including variant detail text."""
-    clean_details = (details or "").strip()
-    if clean_details:
-        return f"{item_name} ({clean_details})"
+def resolved_listing_name(item_name: str, variant: str | None = None) -> str:
+    """Return the player-facing listing name, including variant identity text."""
+    clean_variant = (variant or "").strip()
+    if clean_variant:
+        return f"{item_name} ({clean_variant})"
     return item_name
+
+
+def listing_display_name(listing: dict[str, Any]) -> str:
+    """Use the new display name column, with old rows still readable."""
+    return (
+        listing.get("listing_display_name")
+        or listing.get("item_name")
+        or listing.get("item_clean_name")
+        or "Unknown item"
+    )
+
+
+def source_with_page(source: str | None, page: str | None) -> str:
+    if source and page:
+        clean_page = page.strip()
+        page_text = clean_page if clean_page.casefold().startswith("p") else f"p. {clean_page}"
+        return f"{source}, {page_text}"
+    return source or "Unknown"
 
 
 def sell_validation_error(sheet_item) -> str | None:
@@ -70,15 +95,75 @@ def sell_validation_error(sheet_item) -> str | None:
     return None
 
 
-def _variant_receipt_lines(*, variant_details: str | None, variant_type: str, variant_instructions: str) -> list[str]:
+def _variant_receipt_lines(
+    *,
+    variant: str | None,
+    variant_type: str,
+    variant_instructions: str,
+    details: str | None = None,
+) -> list[str]:
     lines: list[str] = []
-    if variant_details:
-        lines.append(f"* Variant details: {variant_details}")
+    if variant:
+        lines.append(f"* Variant: {variant}")
     if variant_type:
-        lines.append(f"* Variant: {variant_type}")
+        lines.append(f"* Variant type: {variant_type}")
     if variant_instructions:
         lines.append(f"* Variant instructions: {variant_instructions}")
+    if details:
+        lines.append(f"* Notes: {details}")
     return lines
+
+
+def build_sell_receipt(
+    *,
+    activity: str,
+    character: str,
+    level: int,
+    seller_mention: str,
+    seller_display_name: str,
+    listing_name: str,
+    base_item_name: str,
+    variant: str | None,
+    listing_id: str | None,
+    rarity: str,
+    item_detail: str,
+    source: str,
+    page: str,
+    sell_roll: int,
+    seller_payout: int,
+    status: str,
+    details: str | None = None,
+    variant_instructions: str | None = None,
+) -> str:
+    """Build the copyable Adventure Log Receipt stored with successful sales."""
+    lines = [
+        "Adventure Log Receipt:",
+        f"Activity: {activity}",
+        f"Character: {character.strip()} ({level})",
+        f"Seller: {seller_mention} / {seller_display_name}",
+        f"Item: {listing_name}",
+    ]
+    if variant:
+        lines.extend([f"Base item: {base_item_name}", f"Variant: {variant}"])
+    if listing_id:
+        lines.append(f"Listing: {listing_id}")
+    lines.extend(
+        [
+            f"Rarity: {rarity}",
+            f"Item detail: {item_detail}",
+            f"Source: {source_with_page(source, page)}",
+            "DTP spent: 5",
+            "Gold spent: 25gp",
+            f"Sell roll: {sell_roll}",
+            f"Seller payout: {gp(seller_payout)}",
+            f"Sale status: {status}",
+        ]
+    )
+    if details:
+        lines.append(f"Notes: {details}")
+    if variant_instructions and not variant:
+        lines.append(f"Variant instructions: {variant_instructions}")
+    return "\n".join(lines)
 
 
 class Dwarfy(commands.GroupCog, name="dwarfy"):
@@ -142,8 +227,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     @app_commands.describe(
         character="Your character's name.",
         level="Your character's level.",
-        item="The magic item you are selling.",
-        details="Optional exact item details for generic/template items, such as Longsword.",
+        item="The clean magic item name from Bot Items.",
+        variant="Optional identity for generic/template items, such as Longsword.",
+        details="Optional custom notes, not item rules text.",
     )
     async def sell(
         self,
@@ -151,6 +237,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         character: str,
         level: app_commands.Range[int, 1, 20],
         item: str,
+        variant: str | None = None,
         details: str | None = None,
     ) -> None:
         if not await self._require_channel(
@@ -162,7 +249,14 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         if not await self._require_sheet_cache(interaction):
             return
 
-        match = self.bot.sheet_cache.match_item(item)
+        if looks_like_pasted_item_text(item):
+            await interaction.response.send_message(
+                "Use only the clean item name in the item field. The bot already knows the item data.",
+                ephemeral=True,
+            )
+            return
+
+        match = self.bot.sheet_cache.match_item(item, for_sell=True)
         if match.choices:
             await interaction.response.send_message(
                 f"{match.message or 'I found multiple possible item matches.'} Please run the command again with one exact item name:\n"
@@ -186,23 +280,70 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             await interaction.response.send_message(validation_error, ephemeral=True)
             return
 
-        variant_details = (details or "").strip() or None
-        listing_name = resolved_listing_name(sheet_item.name, variant_details)
+        variant_clean = (variant or "").strip() or None
+        details_clean = (details or "").strip() or None
+        is_template = is_generic_template_item(sheet_item)
+
+        if variant_clean and not is_template:
+            await interaction.response.send_message(
+                "Variant is only used for generic/template items like +1 Weapon, Adamantine Armor, or Ammunition of Slaying. This item is already specific. Run the command again without variant.",
+                ephemeral=True,
+            )
+            return
+        if details_clean and not is_template and looks_like_pasted_detail_text(details_clean):
+            await interaction.response.send_message(
+                "Use only the item name in the item field. The bot already knows the item data. Put only custom notes in details.",
+                ephemeral=True,
+            )
+            return
+
+        variant_note = ""
+        if variant_clean and sheet_item.variant_option_list:
+            option_names = {option.casefold() for option in sheet_item.variant_option_list}
+            if variant_clean.casefold() not in option_names:
+                variant_note = "Variant note: This variant was not in the sheet's suggested options."
+
+        listing_name = resolved_listing_name(sheet_item.name, variant_clean)
         seller = interaction.user.mention
+        seller_display = _display_name(interaction.user)
         seller_character = character_label(character, int(level))
         sell_roll = roll_sell_price(sheet_item.rarity)
         declaration = (
             f"{seller} declares that {seller_character} owns {listing_name} and spends 5 DTP and 25gp "
             "to sell it through Dwarfy's Shop."
         )
+        item_detail = item_detail_summary(sheet_item)
 
         if sell_roll.roll == 1:
             variant_lines = _variant_receipt_lines(
-                variant_details=variant_details,
+                variant=variant_clean,
                 variant_type=sheet_item.variant_type,
                 variant_instructions=sheet_item.variant_instructions,
+                details=details_clean,
             )
+            if variant_note:
+                variant_lines.append(f"* {variant_note}")
             variant_block = ("\n" + "\n".join(variant_lines)) if variant_lines else ""
+            receipt = build_sell_receipt(
+                activity="Sell Magic Item through Dwarfy's Shop",
+                character=character,
+                level=int(level),
+                seller_mention=seller,
+                seller_display_name=seller_display,
+                listing_name=listing_name,
+                base_item_name=sheet_item.name,
+                variant=variant_clean,
+                listing_id=None,
+                rarity=sheet_item.rarity,
+                item_detail=item_detail,
+                source=sheet_item.source,
+                page=sheet_item.page,
+                sell_roll=sell_roll.roll,
+                seller_payout=0,
+                status="Final. The item is lost.",
+                details=details_clean,
+                variant_instructions=sheet_item.variant_instructions,
+            )
             output = (
                 f"{declaration}\n"
                 f"{seller} as {seller_character} receives 0gp for {listing_name}.\n\n"
@@ -215,12 +356,32 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 "Dwarfy's Shop receives no inventory.\n"
                 "Dwarfy's Shop makes 0gp.\n"
                 "Sale status: Final. The item is lost.\n\n"
+                f"{receipt}\n\n"
                 "Adventure log reminder:\n"
                 "Record this downtime activity manually on the character's adventure log."
             )
             await send_text_response(interaction, output)
             return
-
+        receipt_preview = build_sell_receipt(
+            activity="Sell Magic Item through Dwarfy's Shop",
+            character=character,
+            level=int(level),
+            seller_mention=seller,
+            seller_display_name=seller_display,
+            listing_name=listing_name,
+            base_item_name=sheet_item.name,
+            variant=variant_clean,
+            listing_id="{listing_id}",
+            rarity=sheet_item.rarity,
+            item_detail=item_detail,
+            source=sheet_item.source,
+            page=sheet_item.page,
+            sell_roll=sell_roll.roll,
+            seller_payout=sell_roll.seller_payout,
+            status="Final, no takebacks",
+            details=details_clean,
+            variant_instructions=sheet_item.variant_instructions,
+        )
         listing = await self.bot.db.create_listing(
             item_name=listing_name,
             rarity=sheet_item.rarity,
@@ -233,16 +394,41 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             seller_character_level=int(level),
             sell_roll=sell_roll.roll,
             seller_payout=sell_roll.seller_payout,
-            variant_details=variant_details,
+            item_clean_name=sheet_item.name,
+            listing_display_name=listing_name,
+            base_item_name=sheet_item.name if variant_clean else None,
+            variant=variant_clean,
+            details=details_clean,
+            variant_details=variant_clean,
             variant_type=sheet_item.variant_type or None,
             variant_instructions=sheet_item.variant_instructions or None,
+            item_type=sheet_item.item_type or None,
+            attunement=sheet_item.attunement or None,
+            page=sheet_item.page or None,
+            display_detail=sheet_item.display_detail or None,
+            short_description=sheet_item.short_description or None,
+            rules_text=sheet_item.rules_text or None,
+            json_notes=sheet_item.json_notes or None,
+            item_tags=sheet_item.item_tags or None,
+            receipt_text=receipt_preview,
+            seller_user_display=seller_display,
         )
+        receipt = receipt_preview.replace("{listing_id}", listing["listing_id"])
+        # Store the final listing number in the receipt after SQLite assigns it.
+        await self.bot.db.db.execute(
+            "UPDATE listings SET receipt_text = ? WHERE listing_id = ?",
+            (receipt, listing["listing_id"]),
+        )
+        await self.bot.db.db.commit()
 
         variant_lines = _variant_receipt_lines(
-            variant_details=variant_details,
+            variant=variant_clean,
             variant_type=sheet_item.variant_type,
             variant_instructions=sheet_item.variant_instructions,
+            details=details_clean,
         )
+        if variant_note:
+            variant_lines.append(f"* {variant_note}")
         variant_block = ("\n" + "\n".join(variant_lines)) if variant_lines else ""
         output = (
             f"{declaration}\n"
@@ -258,10 +444,41 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"* Dwarfy's cost basis: {gp(sell_roll.seller_payout)}\n"
             "* Future sale price: rolled when purchased, never below Dwarfy's cost basis\n"
             f"* Sale status: Final, no takebacks{variant_block}\n\n"
+            f"{receipt}\n\n"
             "Adventure log reminder:\n"
             "Record this downtime activity manually on the character's adventure log."
         )
         await send_text_response(interaction, output)
+
+    @sell.autocomplete("item")
+    async def sell_item_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not self.bot.sheet_cache.loaded:
+            return []
+        return [
+            app_commands.Choice(name=name[:100], value=name[:100])
+            for name in self.bot.sheet_cache.autocomplete_sell_item_names(current)
+        ]
+
+    @sell.autocomplete("variant")
+    async def sell_variant_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not self.bot.sheet_cache.loaded:
+            return []
+        item_name = getattr(interaction.namespace, "item", "") or ""
+        return [
+            app_commands.Choice(name=name[:100], value=name[:100])
+            for name in self.bot.sheet_cache.autocomplete_variant_options(
+                item_name=item_name,
+                query=current,
+            )
+        ]
 
     @app_commands.command(name="browse", description="Browse magic items Dwarfy has for sale.")
     @app_commands.describe(
@@ -299,7 +516,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 continue
             searchable = " ".join(
                 str(listing.get(field) or "")
-                for field in ("item_name", "source", "category", "tags")
+                for field in ("listing_display_name", "item_name", "item_clean_name", "source", "category", "tags", "details")
             ).casefold()
             if search_filter and search_filter not in searchable:
                 continue
@@ -324,6 +541,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             "",
         ]
         for listing, low, high in shown:
+            display_name = listing_display_name(listing)
             seller = mention_user(listing["seller_user_id"], listing["seller_display_name"])
             seller_character = character_label(
                 listing["seller_character_name"],
@@ -331,7 +549,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             lines.extend(
                 [
-                    f"{listing['listing_id']} \u2014 {listing['item_name']} \u2014 {listing['rarity']}",
+                    f"{listing['listing_id']} \u2014 {display_name} \u2014 {listing['rarity']}",
                     (
                         f"Source: {listing['source'] or 'Unknown'} | Price on buy: "
                         f"{price_range_text(low, high)} | Original seller: {seller} as {seller_character}"
@@ -373,10 +591,11 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         await send_text_response(interaction, self._format_inspect(row))
 
     def _format_inspect(self, listing: dict[str, Any]) -> str:
-        seller = mention_user(listing["seller_user_id"], listing["seller_display_name"])
+        display_name = listing_display_name(listing)
+        seller = mention_user(listing.get("seller_user_id"), listing.get("seller_display_name"))
         seller_character = character_label(
-            listing["seller_character_name"],
-            listing["seller_character_level"],
+            listing.get("seller_character_name") or listing.get("seller_character"),
+            listing.get("seller_character_level") or listing.get("seller_level"),
         )
         low, high = possible_final_price_range(
             listing["rarity"],
@@ -385,29 +604,44 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         lines = [
             f"Listing: {listing['listing_id']}",
-            f"Item: {listing['item_name']}",
-            f"Rarity: {listing['rarity']}",
-            f"Source: {listing['source'] or 'Unknown'}",
-            f"Category: {listing['category'] or 'none'}",
-            f"Tags: {listing['tags'] or 'none'}",
-            f"Original seller: {seller} as {seller_character}",
-            f"Dwarfy cost basis: {gp(int(listing['cost_basis']))}",
-            f"Buying price formula: {buy_price_formula(listing['rarity'])}",
-            f"Possible final price: {price_range_text(low, high)}",
-            f"Status: {listing['status']}",
+            f"Item: {display_name}",
         ]
-        if listing.get("variant_details"):
-            lines.append(f"Variant details: {listing['variant_details']}")
+        if listing.get("item_clean_name"):
+            lines.append(f"Clean item name: {listing['item_clean_name']}")
+        if listing.get("base_item_name"):
+            lines.append(f"Base item: {listing['base_item_name']}")
+        if listing.get("variant") or listing.get("variant_details"):
+            lines.append(f"Variant: {listing.get('variant') or listing.get('variant_details')}")
+        if listing.get("details"):
+            lines.append(f"Notes: {listing['details']}")
+
+        lines.extend(
+            [
+                f"Rarity: {listing['rarity']}",
+                f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
+                f"Category: {listing['category'] or 'none'}",
+                f"Tags: {listing['tags'] or 'none'}",
+                f"Item detail: {listing.get('display_detail') or listing.get('item_type') or 'none'}",
+                f"Short description: {listing.get('short_description') or 'none'}",
+                f"Original seller: {seller} as {seller_character}",
+                f"Sell roll: {listing.get('sell_roll')}",
+                f"Seller payout: {gp(int(listing.get('seller_payout') or 0))}",
+                f"Dwarfy cost basis: {gp(int(listing['cost_basis']))}",
+                f"Buying price formula: {buy_price_formula(listing['rarity'])}",
+                f"Possible final price: {price_range_text(low, high)}",
+                f"Status: {listing['status']}",
+            ]
+        )
         if listing.get("variant_type"):
-            lines.append(f"Variant: {listing['variant_type']}")
+            lines.append(f"Variant type: {listing['variant_type']}")
         if listing.get("variant_instructions"):
             lines.append(f"Variant instructions: {listing['variant_instructions']}")
 
         if listing["status"] == "sold":
-            buyer = mention_user(listing["buyer_user_id"], listing["buyer_display_name"])
+            buyer = mention_user(listing.get("buyer_user_id"), listing.get("buyer_display_name"))
             buyer_character = character_label(
-                listing["buyer_character_name"],
-                listing["buyer_character_level"],
+                listing.get("buyer_character_name"),
+                listing.get("buyer_character_level"),
             )
             lines.extend(
                 [
@@ -417,6 +651,16 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                     f"Sold at: {listing['sold_at']}",
                 ]
             )
+            if listing.get("debt_total"):
+                lines.extend(
+                    [
+                        f"Declared gold available: {gp(int(listing.get('buyer_gold_available') or 0))}",
+                        f"Debt shortfall: {gp(int(listing.get('debt_owed') or 0))}",
+                        f"Fine: {gp(int(listing.get('debt_fine') or 0))}",
+                        f"Total debt: {gp(int(listing.get('debt_total') or 0))}",
+                        f"Debt status: {listing.get('debt_status') or 'unpaid'}",
+                    ]
+                )
         elif listing["status"] == "voided":
             lines.extend(
                 [
@@ -425,6 +669,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ]
             )
 
+        if listing.get("receipt_text"):
+            lines.extend(["", "Stored Adventure Log Receipt:", listing["receipt_text"]])
+
         return "\n".join(lines)
 
     @app_commands.command(name="buy", description="Buy an available magic item from Dwarfy.")
@@ -432,6 +679,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         listing="Listing ID only, such as DWF-00017.",
         character="Your character's name.",
         level="Your character's level.",
+        gold="How much gold this character currently has available.",
     )
     async def buy(
         self,
@@ -439,6 +687,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         listing: str,
         character: str,
         level: app_commands.Range[int, 1, 20],
+        gold: app_commands.Range[int, 0, 10_000_000],
     ) -> None:
         if not await self._require_channel(
             interaction,
@@ -468,6 +717,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         buy_roll = roll_buy_price(row["rarity"], int(row["cost_basis"]))
+        item_name = listing_display_name(row)
+        gold_available = int(gold)
+        debt_owed = max(0, buy_roll.final_price - gold_available)
+        debt_fine = 5_000 if debt_owed else 0
+        debt_total = debt_owed + debt_fine
+        debt_status = "unpaid" if debt_total else None
         sold = await self.bot.db.mark_listing_sold(
             listing_id=row["listing_id"],
             buyer_user_id=str(interaction.user.id),
@@ -477,6 +732,11 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             buy_price_roll_detail=buy_roll.roll_detail,
             final_sale_price=buy_roll.final_price,
             realized_profit=buy_roll.realized_profit,
+            buyer_gold_available=gold_available,
+            debt_owed=debt_owed,
+            debt_fine=debt_fine,
+            debt_total=debt_total,
+            debt_status=debt_status,
         )
         if not sold:
             await interaction.response.send_message(
@@ -493,21 +753,45 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             row["seller_character_level"],
         )
 
+        debt_block = ""
+        if debt_total:
+            debt_block = (
+                "\nBroker debt consequence:\n\n"
+                f"* Declared gold available: {gp(gold_available)}\n"
+                f"* Price shortfall: {gp(debt_owed)}\n"
+                f"* Contract default fine: {gp(debt_fine)}\n"
+                f"* Total debt to clear: {gp(debt_total)}\n"
+                "* Character status: Jailed and unplayable until the debt is paid.\n"
+                f"* Item status: {item_name} is still yours, but it cannot be sold or traded until the debt is paid.\n\n"
+                "Dwarfy had already brokered the deal. The seller was paid, the contract was witnessed, "
+                "and the collectors are painfully punctual."
+            )
+        if debt_total:
+            payment_lines = (
+                f"{buyer} as {buyer_character} cannot cover the {gp(buy_roll.final_price)} final price for {item_name}.\n"
+                f"Dwarfy's Shop records a brokered sale for {item_name}; the item transfers, and the debt is now enforceable."
+            )
+        else:
+            payment_lines = (
+                f"{buyer} as {buyer_character} pays {gp(buy_roll.final_price)} to Dwarfy's Shop for {item_name}.\n"
+                f"Dwarfy's Shop receives {gp(buy_roll.final_price)} from {buyer} as {buyer_character} for {item_name}."
+            )
+
         output = (
             f"{buyer} as {buyer_character} spends 5 DTP and 100gp seeking to buy a magic item from Dwarfy's Shop.\n"
-            f"{buyer} as {buyer_character} pays {gp(buy_roll.final_price)} to Dwarfy's Shop for {row['item_name']}.\n"
-            f"Dwarfy's Shop receives {gp(buy_roll.final_price)} from {buyer} as {buyer_character} for {row['item_name']}.\n\n"
+            f"{payment_lines}\n\n"
             "Buying Magic Item receipt:\n\n"
             f"* Listing: {row['listing_id']}\n"
-            f"* Item: {row['item_name']}\n"
+            f"* Item: {item_name}\n"
             f"* Rarity: {row['rarity']}\n"
             f"* Source: {row['source'] or 'Unknown'}\n"
             f"* Original seller: {seller} as {seller_character}\n"
             f"* Dwarfy's cost basis: {gp(int(row['cost_basis']))}\n"
             f"* Asking price roll: {buy_roll.roll_detail}\n"
             f"* Final item price: {gp(buy_roll.final_price)}\n"
+            f"* Declared gold available: {gp(gold_available)}\n"
             f"* Realized Dwarfy profit: {gp(buy_roll.realized_profit)}\n"
-            "* Purchase status: Final, no takebacks\n\n"
+            f"* Purchase status: Final, no takebacks{debt_block}\n\n"
             "Adventure log reminder:\n"
             "Record this downtime activity manually on the character's adventure log."
         )

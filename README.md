@@ -151,6 +151,17 @@ Session Eligible
 Dwarfy Sell Eligible
 Variant Type
 Variant Instructions
+Variant Options
+Page
+Item Type
+Attunement
+Display Detail
+Short Description
+Rules Text
+JSON Notes
+Item Tags
+JSON Source Key
+JSON Match Status
 Notes
 ```
 
@@ -188,6 +199,10 @@ Rules:
 - `Dwarfy Sell Eligible=FALSE` blocks `/dwarfy sell` for that row.
 - `Variant Type` describes generic/template rows, such as `Generic Weapon`, `Generic Armor`, `Generic Shield`, `Generic Ammunition`, `Generic Item`, or `Specific Item`.
 - `Variant Instructions` tells the DM/player how to resolve a generic row.
+- `Variant Options` is an optional comma-separated suggestion list for the `/dwarfy sell` variant field.
+- `Page` is shown with the player-facing source when available.
+- `Item Type`, `Attunement`, `Display Detail`, `Short Description`, and `Rules Text` come from JSON-enriched item data and are used for clean display and audit receipts.
+- `JSON Notes`, `Item Tags`, `JSON Source Key`, and `JSON Match Status` are optional reference/audit columns.
 - `Notes` are for human reference.
 
 Only permanent magic items can be sold to Dwarfy with `/dwarfy sell`. Consumables are valid for `/sessionloot`, but not for shop sales.
@@ -202,17 +217,25 @@ Variant Type: Generic Weapon
 Variant Instructions: Choose any valid weapon when awarded.
 ```
 
-For `/dwarfy sell`, players can use the optional `details` field:
+For `/dwarfy sell`, players can use the optional `variant` field for generic/template item identity:
 
 ```text
 item: +1 Weapon
-details: Longsword
+variant: Longsword
 ```
 
 The shop listing will show:
 
 ```text
 +1 Weapon (Longsword)
+```
+
+Use `details` only for custom notes, such as a minor property, inscription, or session note. Do not paste the item description into `item` or `details`; the bot already reads item data from the sheet.
+
+Normal specific items should not use `variant`. For example, `Ring of Protection` should be sold as:
+
+```text
+item: Ring of Protection
 ```
 
 ## Weighting Example
@@ -230,6 +253,14 @@ The total weight is `6`.
 - Tickets `4-6` select Cloak of Protection.
 
 Changing a `Weight` cell and running `/dwarfy reload` updates future session-loot probabilities.
+
+If `/sessionloot` rolls a rarity that has no eligible pool for that slot type and APL, the bot automatically fills the slot from the nearest valid rarity pool. It tries higher rarities first when two fallback rarities are equally close, keeps permanent slots permanent and consumable slots consumable, and keeps the original d100 roll visible in the public output.
+
+Example:
+
+```text
+Permanent 1: 10 -> Common, fallback to Uncommon -> Gloves of Swimming and Climbing
+```
 
 ## `Monster Components` Columns
 
@@ -295,9 +326,10 @@ If Google Sheets cannot load, the bot still starts when possible. Sheet-dependen
 After that, test the shop flow:
 
 1. In the sell channel, run `/dwarfy sell character:Name level:5 item:Bag of Holding`.
-2. In the shop channel, run `/dwarfy browse`.
-3. Run `/dwarfy inspect listing:DWF-00001`.
-4. Run `/dwarfy buy listing:DWF-00001 character:Other Name level:5`.
+2. For a generic/template item, run `/dwarfy sell character:Name level:5 item:+1 Weapon variant:Longsword`.
+3. In the shop channel, run `/dwarfy browse`.
+4. Run `/dwarfy inspect listing:DWF-00001`.
+5. Run `/dwarfy buy listing:DWF-00001 character:Other Name level:5 gold:2000`.
 
 ## Commands
 
@@ -321,10 +353,16 @@ These require one of the role names in `ADMIN_ROLE_NAMES`:
 ## Channel Rules
 
 - `/dwarfy sell` only works in `DWARFY_SELL_CHANNEL_ID`.
-- `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy` only work in `DWARFY_SHOP_CHANNEL_ID`.
+- `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy` only works in `DWARFY_SHOP_CHANNEL_ID`.
 - `/sessionloot` only checks `SESSION_LOOT_CHANNEL_ID` if that value is filled in.
 
 Wrong-channel errors are private.
+
+## Buying Risk
+
+`/dwarfy buy` asks for the character's available gold because Dwarfy acts as a broker. Once the command is submitted and the listing is valid, the deal is final.
+
+If the rolled final price is higher than the declared gold, the bot still marks the item as sold to that character. The character owes the shortfall plus a `5,000gp` contract-default fine, is jailed/unplayable until that debt is paid, and cannot sell or trade the item until the debt is cleared.
 
 ## Common Errors
 

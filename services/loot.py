@@ -34,6 +34,8 @@ RARITY_TABLES = {
     ],
 }
 
+RARITY_ORDER = ["Common", "Uncommon", "Rare", "Very Rare", "Legendary"]
+
 
 class LootError(Exception):
     """Base class for session loot problems that should be shown to the user."""
@@ -61,10 +63,20 @@ class LootSlot:
     rarity: str
     selection: WeightedSelection | None
     fallback_note: str | None = None
+    selected_rarity: str | None = None
+    staff_review_reason: str | None = None
 
     @property
     def item(self) -> SheetItem | None:
         return self.selection.item if self.selection else None
+
+
+@dataclass(frozen=True)
+class LootSelectionResult:
+    selection: WeightedSelection | None
+    note: str | None
+    selected_rarity: str | None
+    staff_review_reason: str | None = None
 
 
 def tier_for_apl(apl: int) -> tuple[int, str]:
@@ -141,6 +153,82 @@ def _apply_tag_filter(
     return pool, note
 
 
+def _rarity_fallback_order(rarity: str) -> list[str]:
+    """Return rolled rarity, then nearest valid rarity buckets."""
+    if rarity not in RARITY_ORDER:
+        return [rarity]
+
+    index = RARITY_ORDER.index(rarity)
+    ordered = [rarity]
+    for distance in range(1, len(RARITY_ORDER)):
+        higher = index + distance
+        lower = index - distance
+        if higher < len(RARITY_ORDER):
+            ordered.append(RARITY_ORDER[higher])
+        if lower >= 0:
+            ordered.append(RARITY_ORDER[lower])
+    return ordered
+
+
+def _pool_with_optional_tag(
+    *,
+    cache: SheetCache,
+    rarity: str,
+    consumable: bool,
+    apl: int,
+    tag: str | None,
+    require_tag: bool,
+) -> list[SheetItem]:
+    pool = cache.loot_pool(rarity=rarity, consumable=consumable, apl=apl)
+    if not pool or not tag or not require_tag:
+        return pool
+
+    tag_norm = tag.casefold().strip()
+    return [item for item in pool if tag_norm in item.tags]
+
+
+def _find_fallback_pool(
+    *,
+    cache: SheetCache,
+    rarity: str,
+    consumable: bool,
+    apl: int,
+    tag: str | None,
+    require_tag: bool,
+) -> tuple[str | None, list[SheetItem]]:
+    for candidate_rarity in _rarity_fallback_order(rarity):
+        pool = _pool_with_optional_tag(
+            cache=cache,
+            rarity=candidate_rarity,
+            consumable=consumable,
+            apl=apl,
+            tag=tag,
+            require_tag=require_tag,
+        )
+        if pool:
+            return candidate_rarity, pool
+    return None, []
+
+
+def _tag_fallback_note(
+    *,
+    rolled_rarity: str,
+    selected_rarity: str,
+    consumable: bool,
+    tag: str,
+) -> str:
+    slot_word = "consumable" if consumable else "permanent"
+    rarity_note = (
+        f" or fallback rarity {selected_rarity}"
+        if selected_rarity != rolled_rarity
+        else ""
+    )
+    return (
+        f'Note: No tagged {rolled_rarity} {slot_word} items{rarity_note} '
+        f'found for tag "{tag}"; used the untagged eligible pool instead.'
+    )
+
+
 def select_loot_item(
     *,
     cache: SheetCache,
@@ -149,18 +237,55 @@ def select_loot_item(
     apl: int,
     tag: str | None,
     used_permanent_names: set[str],
-) -> tuple[WeightedSelection | None, str | None]:
+) -> LootSelectionResult:
     """Build the final pool and select an item with weighted randomness."""
-    pool = cache.loot_pool(rarity=rarity, consumable=consumable, apl=apl)
-    if not pool:
-        return None, None
+    selected_rarity: str | None
+    final_pool: list[SheetItem]
+    fallback_note: str | None = None
 
-    final_pool, fallback_note = _apply_tag_filter(
-        pool=pool,
-        rarity=rarity,
-        consumable=consumable,
-        tag=tag,
-    )
+    if tag:
+        selected_rarity, final_pool = _find_fallback_pool(
+            cache=cache,
+            rarity=rarity,
+            consumable=consumable,
+            apl=apl,
+            tag=tag,
+            require_tag=True,
+        )
+        if selected_rarity is None:
+            selected_rarity, final_pool = _find_fallback_pool(
+                cache=cache,
+                rarity=rarity,
+                consumable=consumable,
+                apl=apl,
+                tag=tag,
+                require_tag=False,
+            )
+            if selected_rarity is not None:
+                fallback_note = _tag_fallback_note(
+                    rolled_rarity=rarity,
+                    selected_rarity=selected_rarity,
+                    consumable=consumable,
+                    tag=tag,
+                )
+    else:
+        selected_rarity, final_pool = _find_fallback_pool(
+            cache=cache,
+            rarity=rarity,
+            consumable=consumable,
+            apl=apl,
+            tag=None,
+            require_tag=False,
+        )
+
+    if selected_rarity is None or not final_pool:
+        consumable_text = "TRUE" if consumable else "FALSE"
+        reason = (
+            f"No Allowed=TRUE, Session Eligible=TRUE, Consumable={consumable_text} "
+            f"items found for APL {apl} in any supported fallback rarity."
+        )
+        print(f"Session loot staff review: rolled {rarity}; {reason}")
+        return LootSelectionResult(None, None, None, reason)
 
     if not consumable:
         unused_pool = [
@@ -172,7 +297,7 @@ def select_loot_item(
     selection = pick_weighted_item(final_pool)
     if not consumable:
         used_permanent_names.add(selection.item.name.casefold())
-    return selection, fallback_note
+    return LootSelectionResult(selection, fallback_note, selected_rarity)
 
 
 def _weighted_audit_line(selection: WeightedSelection) -> str:
@@ -192,6 +317,13 @@ def _variant_lines(item: SheetItem) -> list[str]:
     return lines
 
 
+def _slot_heading(slot: LootSlot, item_name: str) -> str:
+    selected_rarity = slot.selected_rarity or slot.rarity
+    if selected_rarity != slot.rarity:
+        return f"{slot.label}: {slot.d100} -> {slot.rarity}, fallback to {selected_rarity} -> {item_name}"
+    return f"{slot.label}: {slot.d100} -> {slot.rarity} -> {item_name}"
+
+
 def _format_item_slot(
     *,
     cache: SheetCache,
@@ -201,11 +333,14 @@ def _format_item_slot(
     creature_type: str | None,
 ) -> str:
     if slot.selection is None:
-        consumable_text = "TRUE" if consumable else "FALSE"
+        if slot.staff_review_reason:
+            return (
+                f"{slot.label}: {slot.d100} -> {slot.rarity} -> STAFF REVIEW NEEDED\n"
+                "This slot could not be filled from the current sheet. Staff should check the bot logs and sheet filters."
+            )
         return (
-            f"{slot.label}: {slot.d100} -> {slot.rarity} -> NO MATCH FOUND\n"
-            f"Reason: No Allowed=TRUE, Session Eligible=TRUE, Consumable={consumable_text}, "
-            f"Roll Rarity={slot.rarity} items found for APL {apl}."
+            f"{slot.label}: {slot.d100} -> {slot.rarity} -> STAFF REVIEW NEEDED\n"
+            "This slot could not be filled from the current sheet."
         )
 
     item = slot.selection.item
@@ -215,13 +350,13 @@ def _format_item_slot(
             component = cache.roll_monster_component(selected_creature_type)
         except (RuntimeError, ValueError) as exc:
             return (
-                f"{slot.label}: {slot.d100} -> {slot.rarity} -> Monster Component\n"
+                f"{_slot_heading(slot, 'Monster Component')}\n"
                 f"{_weighted_audit_line(slot.selection)}\n"
                 f"Reason: {exc}"
             )
         component_roll = component.d100 if component.d100 is not None else "random"
         lines = [
-            f"{slot.label}: {slot.d100} -> {slot.rarity} -> Monster Component",
+            _slot_heading(slot, "Monster Component"),
             _weighted_audit_line(slot.selection),
             (
                 f"Creature Type: {component.creature_type} | Component Roll: "
@@ -234,9 +369,9 @@ def _format_item_slot(
         return "\n".join(lines)
 
     lines = [
-        f"{slot.label}: {slot.d100} -> {slot.rarity} -> {item.name}",
+        _slot_heading(slot, item.name),
         _weighted_audit_line(slot.selection),
-        f"Source: {item.source or 'Unknown'} | Tags: {_tags_text(item)}",
+        f"Source: {item.source_with_page} | Tags: {_tags_text(item)}",
     ]
     lines.extend(_variant_lines(item))
     return "\n".join(lines)
@@ -282,7 +417,7 @@ def build_session_loot_output(
     for index in range(1, permanent_slots + 1):
         d100 = random.randint(1, 100)
         rarity = rarity_from_roll(tier, d100)
-        selection, note = select_loot_item(
+        result = select_loot_item(
             cache=cache,
             rarity=rarity,
             consumable=False,
@@ -290,14 +425,24 @@ def build_session_loot_output(
             tag=tag_clean,
             used_permanent_names=used_permanent_names,
         )
-        if note and note not in fallback_notes:
-            fallback_notes.append(note)
-        permanent.append(LootSlot(f"Permanent {index}", d100, rarity, selection, note))
+        if result.note and result.note not in fallback_notes:
+            fallback_notes.append(result.note)
+        permanent.append(
+            LootSlot(
+                f"Permanent {index}",
+                d100,
+                rarity,
+                result.selection,
+                result.note,
+                result.selected_rarity,
+                result.staff_review_reason,
+            )
+        )
 
     for index in range(1, consumable_slots + 1):
         d100 = random.randint(1, 100)
         rarity = rarity_from_roll(tier, d100)
-        selection, note = select_loot_item(
+        result = select_loot_item(
             cache=cache,
             rarity=rarity,
             consumable=True,
@@ -305,9 +450,19 @@ def build_session_loot_output(
             tag=tag_clean,
             used_permanent_names=used_permanent_names,
         )
-        if note and note not in fallback_notes:
-            fallback_notes.append(note)
-        consumable.append(LootSlot(f"Consumable {index}", d100, rarity, selection, note))
+        if result.note and result.note not in fallback_notes:
+            fallback_notes.append(result.note)
+        consumable.append(
+            LootSlot(
+                f"Consumable {index}",
+                d100,
+                rarity,
+                result.selection,
+                result.note,
+                result.selected_rarity,
+                result.staff_review_reason,
+            )
+        )
 
     lines = [
         "\U0001F381 Session Loot",

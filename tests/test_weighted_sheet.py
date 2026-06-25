@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -61,6 +63,16 @@ def item(
     dwarfy_sell_eligible=None,
     variant_type="",
     variant_instructions="",
+    min_apl=None,
+    max_apl=None,
+    page="",
+    item_type="",
+    attunement="",
+    display_detail="",
+    short_description="",
+    rules_text="",
+    item_tags="",
+    variant_options="",
 ):
     return SheetItem(
         name=name,
@@ -77,12 +89,20 @@ def item(
         alternate_sources="",
         category="Wondrous item",
         tags=tuple(tag.casefold() for tag in tags),
-        min_apl=None,
-        max_apl=None,
+        min_apl=min_apl,
+        max_apl=max_apl,
         session_eligible=session_eligible,
         dwarfy_sell_eligible=dwarfy_sell_eligible,
         variant_type=variant_type,
         variant_instructions=variant_instructions,
+        page=page,
+        item_type=item_type,
+        attunement=attunement,
+        display_detail=display_detail,
+        short_description=short_description,
+        rules_text=rules_text,
+        item_tags=item_tags,
+        variant_options=variant_options,
         notes="",
     )
 
@@ -217,7 +237,7 @@ class WeightedSelectionTests(unittest.TestCase):
         ])
 
         with patch("services.loot.random.randint", return_value=1):
-            selection, note = select_loot_item(
+            result = select_loot_item(
                 cache=cache,
                 rarity="Uncommon",
                 consumable=False,
@@ -226,14 +246,14 @@ class WeightedSelectionTests(unittest.TestCase):
                 used_permanent_names=set(),
             )
 
-        self.assertEqual(selection.item.name, "Storage")
-        self.assertIsNone(note)
+        self.assertEqual(result.selection.item.name, "Storage")
+        self.assertIsNone(result.note)
 
     def test_tag_fallback_uses_full_pool_when_no_tagged_rows_remain(self):
         cache = make_cache([item("Storage"), item("Defense")])
 
         with patch("services.loot.random.randint", return_value=2):
-            selection, note = select_loot_item(
+            result = select_loot_item(
                 cache=cache,
                 rarity="Uncommon",
                 consumable=False,
@@ -242,14 +262,14 @@ class WeightedSelectionTests(unittest.TestCase):
                 used_permanent_names=set(),
             )
 
-        self.assertEqual(selection.item.name, "Defense")
-        self.assertIn("No tagged Uncommon permanent items", note)
+        self.assertEqual(result.selection.item.name, "Defense")
+        self.assertIn("No tagged Uncommon permanent items", result.note)
 
     def test_permanent_duplicate_avoidance_and_audit_count(self):
         cache = make_cache([item("Already Picked", weight=5), item("Alternative", weight=2)])
 
         with patch("services.loot.random.randint", return_value=1):
-            selection, _note = select_loot_item(
+            result = select_loot_item(
                 cache=cache,
                 rarity="Uncommon",
                 consumable=False,
@@ -258,16 +278,16 @@ class WeightedSelectionTests(unittest.TestCase):
                 used_permanent_names={"already picked"},
             )
 
-        self.assertEqual(selection.item.name, "Alternative")
-        self.assertEqual(selection.eligible_entry_count, 1)
-        self.assertEqual(selection.total_weight, 2)
+        self.assertEqual(result.selection.item.name, "Alternative")
+        self.assertEqual(result.selection.eligible_entry_count, 1)
+        self.assertEqual(result.selection.total_weight, 2)
 
     def test_consumables_may_repeat(self):
         cache = make_cache([item("Potion", consumable=True)])
         used = {"potion"}
 
         with patch("services.loot.random.randint", return_value=1):
-            first, _ = select_loot_item(
+            first = select_loot_item(
                 cache=cache,
                 rarity="Uncommon",
                 consumable=True,
@@ -275,7 +295,7 @@ class WeightedSelectionTests(unittest.TestCase):
                 tag=None,
                 used_permanent_names=used,
             )
-            second, _ = select_loot_item(
+            second = select_loot_item(
                 cache=cache,
                 rarity="Uncommon",
                 consumable=True,
@@ -284,10 +304,66 @@ class WeightedSelectionTests(unittest.TestCase):
                 used_permanent_names=used,
             )
 
-        self.assertEqual(first.item.name, "Potion")
-        self.assertEqual(second.item.name, "Potion")
+        self.assertEqual(first.selection.item.name, "Potion")
+        self.assertEqual(second.selection.item.name, "Potion")
 
-    def test_no_match_found_does_not_attempt_weighted_roll(self):
+    def test_apl_9_common_permanent_falls_back_to_uncommon(self):
+        cache = make_cache([
+            item("Uncommon Permanent", roll_rarity="Uncommon", min_apl=5, max_apl=10),
+            item("Rare Permanent", rarity="Rare", roll_rarity="Rare", min_apl=5, max_apl=10),
+        ])
+
+        with patch("services.loot.random.randint", return_value=1):
+            result = select_loot_item(
+                cache=cache,
+                rarity="Common",
+                consumable=False,
+                apl=9,
+                tag=None,
+                used_permanent_names=set(),
+            )
+
+        self.assertEqual(result.selection.item.name, "Uncommon Permanent")
+        self.assertEqual(result.selected_rarity, "Uncommon")
+
+    def test_fallback_preserves_slot_type_and_apl_filter(self):
+        cache = make_cache([
+            item("Wrong APL", roll_rarity="Uncommon", min_apl=1, max_apl=4),
+            item("Consumable Only", roll_rarity="Uncommon", consumable=True, min_apl=5, max_apl=10),
+            item("Correct Permanent", roll_rarity="Rare", rarity="Rare", min_apl=5, max_apl=10),
+        ])
+
+        with patch("services.loot.random.randint", return_value=1):
+            result = select_loot_item(
+                cache=cache,
+                rarity="Common",
+                consumable=False,
+                apl=9,
+                tag=None,
+                used_permanent_names=set(),
+            )
+
+        self.assertEqual(result.selection.item.name, "Correct Permanent")
+        self.assertEqual(result.selected_rarity, "Rare")
+
+    def test_sessionloot_players_7_apl_9_fills_all_slots_without_no_match(self):
+        cache = make_cache([
+            item("Fallback Permanent", roll_rarity="Uncommon", min_apl=5, max_apl=10),
+            item("Common Consumable", roll_rarity="Common", consumable=True, min_apl=5, max_apl=10),
+        ])
+        rolls = [70, 60, 50, 40, 30, 20, 10]
+        rolls.extend([10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1])
+
+        with patch("services.loot.random.randint", side_effect=rolls):
+            output = build_session_loot_output(cache=cache, players=7, apl=9)
+
+        for label in ("Permanent 1:", "Permanent 2:", "Permanent 3:", "Consumable 1:", "Consumable 2:", "Consumable 3:", "Consumable 4:"):
+            self.assertIn(label, output)
+        self.assertIn("Permanent 1: 10 -> Common, fallback to Uncommon -> Fallback Permanent", output)
+        self.assertIn("Consumable 4:", output)
+        self.assertNotIn("NO MATCH FOUND", output)
+
+    def test_staff_review_does_not_attempt_weighted_roll(self):
         cache = make_cache([])
 
         with patch("services.loot.random.randint", return_value=50), patch(
@@ -296,7 +372,8 @@ class WeightedSelectionTests(unittest.TestCase):
             output = build_session_loot_output(cache=cache, players=2, apl=3)
 
         pick.assert_not_called()
-        self.assertIn("NO MATCH FOUND", output)
+        self.assertIn("STAFF REVIEW NEEDED", output)
+        self.assertNotIn("NO MATCH FOUND", output)
 
 
 class MonsterComponentTests(unittest.TestCase):
@@ -345,6 +422,35 @@ class MonsterComponentTests(unittest.TestCase):
 
 
 class MatchingAndDwarfyTests(unittest.TestCase):
+    def test_sell_item_autocomplete_returns_unique_clean_names(self):
+        cache = make_cache([
+            item("Ring of Protection", rarity="Rare", roll_rarity="Uncommon"),
+            item("Ring of Protection", rarity="Rare", roll_rarity="Rare"),
+            item("Potion of Healing", consumable=True),
+            item("Blocked", dwarfy_sell_eligible=False),
+        ])
+
+        self.assertEqual(cache.autocomplete_sell_item_names("ring"), ["Ring of Protection"])
+
+    def test_ring_of_protection_sells_as_clean_name_with_enriched_data(self):
+        row = item(
+            "Ring of Protection",
+            rarity="Rare",
+            roll_rarity="Uncommon",
+            page="294",
+            item_type="Ring",
+            display_detail="Rare Ring, requires attunement",
+            short_description="You gain a bonus to AC and saving throws.",
+        )
+        cache = make_cache([row, item("Ring of Protection", rarity="Rare", roll_rarity="Rare", page="294", item_type="Ring", display_detail="Rare Ring, requires attunement", short_description="You gain a bonus to AC and saving throws.")])
+
+        match = cache.match_item("Ring of Protection", for_sell=True)
+
+        self.assertEqual(match.item.name, "Ring of Protection")
+        self.assertEqual(match.item.rarity, "Rare")
+        self.assertEqual(match.item.roll_rarity, "Uncommon")
+        self.assertEqual(match.item.page, "294")
+
     def test_fuzzy_suggestions_contain_unique_item_names(self):
         cache = make_cache([
             item("Bag of Holding", source="DMG 2024"),
@@ -367,6 +473,17 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertIsNone(match.item)
         self.assertIn("conflict", match.message)
 
+    def test_conflicting_duplicate_sell_records_are_ambiguous(self):
+        cache = make_cache([
+            item("Same Name", source="DMG 2024"),
+            item("Same Name", source="XGE"),
+        ])
+
+        match = cache.match_item("Same Name", for_sell=True)
+
+        self.assertIsNone(match.item)
+        self.assertIn("conflict", match.message)
+
     def test_dwarfy_sell_eligible_false_rejects_sale(self):
         from cogs.dwarfy import sell_validation_error
 
@@ -378,6 +495,37 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         from cogs.dwarfy import resolved_listing_name
 
         self.assertEqual(resolved_listing_name("+1 Weapon", "Longsword"), "+1 Weapon (Longsword)")
+
+    def test_variant_options_are_parsed_and_autocompleted(self):
+        cache = make_cache([
+            item("+1 Weapon", variant_type="Generic Weapon", variant_options="Longsword, Rapier, Longbow"),
+        ])
+
+        self.assertEqual(
+            cache.autocomplete_variant_options(item_name="+1 Weapon", query="long"),
+            ["Longsword", "Longbow"],
+        )
+
+    def test_pasted_item_text_is_rejected_but_parentheses_names_are_allowed(self):
+        from services.sheets import looks_like_pasted_detail_text, looks_like_pasted_item_text
+
+        self.assertTrue(looks_like_pasted_item_text("Ring of Protection requires attunement. You gain a bonus."))
+        self.assertTrue(looks_like_pasted_detail_text("Requires attunement while wearing this item. You gain a bonus."))
+        self.assertFalse(looks_like_pasted_item_text("Ring of Mind Shielding (empty)"))
+
+    def test_generic_template_detection(self):
+        from services.sheets import is_generic_template_item
+
+        self.assertTrue(is_generic_template_item(item("+1 Weapon", variant_type="Generic Weapon")))
+        self.assertFalse(is_generic_template_item(item("Ring of Protection", variant_type="Specific Item")))
+
+    def test_item_detail_summary_uses_enriched_display_detail(self):
+        from services.sheets import item_detail_summary
+
+        self.assertEqual(
+            item_detail_summary(item("Ring", rarity="Rare", item_type="Ring", display_detail="Rare Ring, requires attunement")),
+            "Rare Ring, requires attunement",
+        )
 
     def test_inspect_displays_resolved_variant_listing_name(self):
         from cogs.dwarfy import Dwarfy
@@ -396,15 +544,59 @@ class MatchingAndDwarfyTests(unittest.TestCase):
             "cost_basis": 200,
             "status": "available",
             "variant_details": "Longsword",
+            "listing_display_name": "+1 Weapon (Longsword)",
+            "item_clean_name": "+1 Weapon",
+            "variant": "Longsword",
             "variant_type": "Generic Weapon",
             "variant_instructions": "Choose any valid weapon when awarded.",
+            "sell_roll": 14,
+            "seller_payout": 200,
+            "receipt_text": "Adventure Log Receipt:\nItem: +1 Weapon (Longsword)",
         }
 
         output = Dwarfy._format_inspect(object.__new__(Dwarfy), listing)
 
         self.assertIn("Item: +1 Weapon (Longsword)", output)
-        self.assertIn("Variant details: Longsword", output)
+        self.assertIn("Variant: Longsword", output)
         self.assertIn("Variant instructions: Choose any valid weapon when awarded.", output)
+        self.assertIn("Stored Adventure Log Receipt:", output)
+
+    def test_database_stores_receipt_text_and_listing_display_name(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_listing(
+                        item_name="+1 Weapon (Longsword)",
+                        rarity="Uncommon",
+                        source="DMG 2024",
+                        category="Weapon",
+                        tags="weapon",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Rhett",
+                        seller_character_level=9,
+                        sell_roll=14,
+                        seller_payout=200,
+                        item_clean_name="+1 Weapon",
+                        listing_display_name="+1 Weapon (Longsword)",
+                        base_item_name="+1 Weapon",
+                        variant="Longsword",
+                        details="Inscribed.",
+                        receipt_text="Adventure Log Receipt:\nItem: +1 Weapon (Longsword)",
+                    )
+                    fetched = await db.get_listing(row["listing_id"])
+                finally:
+                    await db.close()
+                return fetched
+
+        fetched = asyncio.run(run_case())
+
+        self.assertEqual(fetched["listing_display_name"], "+1 Weapon (Longsword)")
+        self.assertIn("Adventure Log Receipt", fetched["receipt_text"])
 
     def test_existing_buy_pricing_still_uses_floor(self):
         self.assertEqual(possible_final_price_range("Uncommon", 320), (320, 600))

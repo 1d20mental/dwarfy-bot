@@ -54,10 +54,33 @@ class SheetItem:
     dwarfy_sell_eligible: bool | None = None
     variant_type: str = ""
     variant_instructions: str = ""
+    page: str = ""
+    item_type: str = ""
+    attunement: str = ""
+    display_detail: str = ""
+    short_description: str = ""
+    rules_text: str = ""
+    json_notes: str = ""
+    item_tags: str = ""
+    variant_options: str = ""
+    json_source_key: str = ""
+    json_match_status: str = ""
 
     @property
     def tags_text(self) -> str:
         return ", ".join(self.tags)
+
+    @property
+    def variant_option_list(self) -> tuple[str, ...]:
+        return tuple(option.strip() for option in self.variant_options.split(",") if option.strip())
+
+    @property
+    def source_with_page(self) -> str:
+        if self.source and self.page:
+            page = self.page.strip()
+            page_text = page if page.casefold().startswith("p") else f"p. {page}"
+            return f"{self.source}, {page_text}"
+        return self.source or "Unknown"
 
 
 @dataclass(frozen=True)
@@ -255,6 +278,124 @@ def _critical_match_key(item: SheetItem) -> tuple[str, str, bool, bool, bool | N
     )
 
 
+def _sell_match_key(item: SheetItem) -> tuple[object, ...]:
+    """Fields that must agree before duplicate sell rows collapse together."""
+    return (
+        item.name.casefold().strip(),
+        item.rarity,
+        item.source,
+        item.consumable,
+        item.allowed,
+        item.dwarfy_sell_eligible,
+        item.item_type,
+        item.attunement,
+        item.page,
+        item.display_detail,
+        item.short_description,
+        item.rules_text,
+        item.variant_type,
+        item.variant_instructions,
+        item.variant_options,
+    )
+
+
+GENERIC_ITEM_NAMES = {
+    "+1 weapon",
+    "+2 weapon",
+    "+3 weapon",
+    "+1 armor",
+    "+2 armor",
+    "+3 armor",
+    "+1 ammunition",
+    "+2 ammunition",
+    "+3 ammunition",
+    "adamantine armor",
+    "adamantine weapon",
+    "armor of resistance",
+    "ammunition of slaying",
+    "enspelled weapon",
+    "enspelled armor",
+    "dragon slayer",
+    "flame tongue",
+    "frost brand",
+    "holy avenger",
+    "vorpal weapon",
+}
+
+GENERIC_NAME_MARKERS = (
+    "(any)",
+    "any weapon",
+    "any armor",
+    "any medium or heavy armor",
+    "any melee weapon",
+    "any ranged weapon",
+)
+
+PASTED_ITEM_MARKERS = (
+    "requires attunement",
+    "you gain",
+    "while wearing",
+    "dungeon master's guide",
+    "pg.",
+    "page",
+)
+
+
+def is_generic_template_item(item: SheetItem) -> bool:
+    """Return True for sheet rows that need player/DM variant resolution."""
+    variant_type = item.variant_type.casefold().strip()
+    if variant_type and variant_type != "specific item":
+        return True
+    if item.variant_instructions.strip() or item.variant_options.strip():
+        return True
+
+    name_norm = item.name.casefold().strip()
+    if name_norm in GENERIC_ITEM_NAMES:
+        return True
+    return any(marker in name_norm for marker in GENERIC_NAME_MARKERS)
+
+
+def looks_like_pasted_item_text(text: str) -> bool:
+    """Catch common cases where a player pasted a full item entry."""
+    clean = _clean(text)
+    if len(clean) > 100:
+        return True
+    lowered = clean.casefold()
+    if any(marker in lowered for marker in PASTED_ITEM_MARKERS):
+        return True
+
+    # Two or more sentence periods is a good signal for pasted prose. A single
+    # period can still appear in odd but valid names, so keep this conservative.
+    return len(re.findall(r"\.\s+", clean)) >= 2 or clean.count(".") >= 3
+
+
+def looks_like_pasted_detail_text(text: str) -> bool:
+    """Reject full rules blocks in details while allowing short custom notes."""
+    clean = _clean(text)
+    lowered = clean.casefold()
+    if len(clean) > 500:
+        return True
+    return any(marker in lowered for marker in PASTED_ITEM_MARKERS[:4])
+
+
+def item_detail_summary(item: SheetItem) -> str:
+    """Create a compact player-facing item detail line."""
+    if item.display_detail:
+        return item.display_detail
+
+    parts = [item.rarity]
+    if item.item_type:
+        parts.append(item.item_type)
+    summary = " ".join(part for part in parts if part).strip()
+    if item.attunement:
+        attunement = item.attunement.strip()
+        if attunement.casefold() in TRUE_TEXT:
+            summary = f"{summary}, requires attunement" if summary else "requires attunement"
+        elif attunement.casefold() not in FALSE_TEXT:
+            summary = f"{summary}, {attunement}" if summary else attunement
+    return summary or item.rarity or "Magic item"
+
+
 def _unique_items_by_name(items: Iterable[SheetItem]) -> tuple[SheetItem, ...]:
     seen: set[str] = set()
     unique: list[SheetItem] = []
@@ -445,6 +586,17 @@ class SheetCache:
                     dwarfy_sell_eligible=dwarfy_sell_eligible,
                     variant_type=_cell(row, headers, "Variant Type"),
                     variant_instructions=_cell(row, headers, "Variant Instructions"),
+                    page=_cell(row, headers, "Page"),
+                    item_type=_cell(row, headers, "Item Type"),
+                    attunement=_cell(row, headers, "Attunement"),
+                    display_detail=_cell(row, headers, "Display Detail"),
+                    short_description=_cell(row, headers, "Short Description"),
+                    rules_text=_cell(row, headers, "Rules Text"),
+                    json_notes=_cell(row, headers, "JSON Notes"),
+                    item_tags=_cell(row, headers, "Item Tags"),
+                    variant_options=_cell(row, headers, "Variant Options"),
+                    json_source_key=_cell(row, headers, "JSON Source Key"),
+                    json_match_status=_cell(row, headers, "JSON Match Status"),
                     notes=_cell(row, headers, "Notes"),
                 )
             )
@@ -481,35 +633,61 @@ class SheetCache:
             )
         return components
 
-    def _canonical_exact_match(self, query_norm: str) -> ItemMatch:
+    def _sell_preference_score(self, item: SheetItem) -> int:
+        score = 0
+        if item.allowed:
+            score += 4
+        if not item.consumable:
+            score += 2
+        if item.dwarfy_sell_eligible is not False:
+            score += 1
+        return score
+
+    def _canonical_exact_match(self, query_norm: str, *, for_sell: bool = False) -> ItemMatch:
         exact_matches = [
             item for item in self.items if item.name.casefold().strip() == query_norm
         ]
         if not exact_matches:
             return ItemMatch(item=None)
 
-        critical_keys = {_critical_match_key(item) for item in exact_matches}
+        candidates = exact_matches
+        if for_sell:
+            best_score = max(self._sell_preference_score(item) for item in exact_matches)
+            candidates = [
+                item for item in exact_matches if self._sell_preference_score(item) == best_score
+            ]
+            critical_keys = {_sell_match_key(item) for item in candidates}
+            conflict_fields = (
+                "Rarity, Source, item detail, Consumable, Allowed, "
+                "Dwarfy Sell Eligible, or variant data"
+            )
+        else:
+            critical_keys = {_critical_match_key(item) for item in candidates}
+            conflict_fields = "Rarity, Consumable, Allowed, and Dwarfy Sell Eligible"
+
         if len(critical_keys) > 1:
             display_name = exact_matches[0].name
             return ItemMatch(
                 item=None,
                 message=(
                     f"Multiple Bot Items rows named `{display_name}` conflict on Dwarfy-critical data. "
-                    "Ask a maintainer to align Rarity, Consumable, Allowed, and Dwarfy Sell Eligible before selling it."
+                    f"Ask a maintainer to align {conflict_fields} before selling it."
                 ),
             )
 
-        return ItemMatch(item=exact_matches[0])
+        return ItemMatch(item=candidates[0])
 
-    def match_item(self, query: str) -> ItemMatch:
+    def match_item(self, query: str, *, for_sell: bool = False) -> ItemMatch:
         """Find an item by exact match first, then by difflib fuzzy matching."""
         query_norm = query.casefold().strip()
-        exact = self._canonical_exact_match(query_norm)
+        exact = self._canonical_exact_match(query_norm, for_sell=for_sell)
         if exact.item is not None or exact.message:
             return exact
 
         best_by_name: dict[str, tuple[float, SheetItem]] = {}
         for item in self.items:
+            if for_sell and item.consumable:
+                continue
             score = _score_match(query, item.name)
             if score < 0.58:
                 continue
@@ -525,9 +703,9 @@ class SheetCache:
         second_score = scored[1][0] if len(scored) > 1 else 0.0
 
         if top_score >= 0.86 and top_score - second_score >= 0.08:
-            return self._canonical_exact_match(top_item.name.casefold().strip())
+            return self._canonical_exact_match(top_item.name.casefold().strip(), for_sell=for_sell)
         if len(scored) == 1 and top_score >= 0.65:
-            return self._canonical_exact_match(top_item.name.casefold().strip())
+            return self._canonical_exact_match(top_item.name.casefold().strip(), for_sell=for_sell)
 
         choices = _unique_items_by_name(item for _score, item in scored[:8])
         return ItemMatch(
@@ -535,6 +713,54 @@ class SheetCache:
             choices=choices,
             message="Multiple possible item matches were found.",
         )
+
+    def autocomplete_sell_item_names(self, query: str, *, limit: int = 25) -> list[str]:
+        """Return unique clean names suitable for Discord item autocomplete."""
+        query_norm = query.casefold().strip()
+        seen: set[str] = set()
+        starts: list[str] = []
+        contains: list[str] = []
+
+        for item in self.items:
+            if not item.allowed or item.consumable or item.dwarfy_sell_eligible is False:
+                continue
+            key = item.name.casefold().strip()
+            if key in seen:
+                continue
+            if query_norm and query_norm not in key:
+                continue
+            seen.add(key)
+            if query_norm and key.startswith(query_norm):
+                starts.append(item.name)
+            else:
+                contains.append(item.name)
+
+        return (starts + contains)[:limit]
+
+    def autocomplete_variant_options(
+        self,
+        *,
+        item_name: str,
+        query: str,
+        limit: int = 25,
+    ) -> list[str]:
+        """Return suggested variants from the selected item's Variant Options."""
+        match = self.match_item(item_name, for_sell=True)
+        if match.item is None:
+            return []
+
+        query_norm = query.casefold().strip()
+        options = []
+        seen: set[str] = set()
+        for option in match.item.variant_option_list:
+            key = option.casefold()
+            if key in seen:
+                continue
+            if query_norm and query_norm not in key:
+                continue
+            seen.add(key)
+            options.append(option)
+        return options[:limit]
 
     def loot_pool(self, *, rarity: str, consumable: bool, apl: int) -> list[SheetItem]:
         """Return session-eligible items matching roll rarity, slot type, and APL."""
