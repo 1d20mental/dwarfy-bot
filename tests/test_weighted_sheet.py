@@ -422,6 +422,20 @@ class MonsterComponentTests(unittest.TestCase):
 
 
 class MatchingAndDwarfyTests(unittest.TestCase):
+    def test_listing_id_parser_accepts_common_copy_paste_forms(self):
+        from cogs.dwarfy import parse_listing_id
+
+        self.assertEqual(parse_listing_id("DWF-00007"), "DWF-00007")
+        self.assertEqual(parse_listing_id("dwf-7"), "DWF-00007")
+        self.assertEqual(parse_listing_id("`DWF-00007`"), "DWF-00007")
+        self.assertEqual(parse_listing_id("DWF-00007 - Staff of the Adder"), "DWF-00007")
+        self.assertEqual(parse_listing_id("DWF-00007 \u2014 Staff of the Adder \u2014 Uncommon"), "DWF-00007")
+
+    def test_listing_id_parser_rejects_item_names_without_ids(self):
+        from cogs.dwarfy import parse_listing_id
+
+        self.assertIsNone(parse_listing_id("Staff of the Adder"))
+
     def test_browse_rarity_filter_uses_discord_choices(self):
         from cogs.dwarfy import BROWSE_RARITY_CHOICES, BROWSE_RARITY_VALUES
 
