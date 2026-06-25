@@ -60,6 +60,9 @@ class DwarfyDatabase:
                 sell_roll INTEGER NOT NULL,
                 seller_payout INTEGER NOT NULL,
                 cost_basis INTEGER NOT NULL,
+                variant_details TEXT,
+                variant_type TEXT,
+                variant_instructions TEXT,
                 status TEXT NOT NULL CHECK (status IN ('available', 'sold', 'voided')),
                 buyer_user_id TEXT,
                 buyer_display_name TEXT,
@@ -90,7 +93,21 @@ class DwarfyDatabase:
             )
             """
         )
+        await self._migrate_listings_table()
         await self.db.commit()
+
+    async def _migrate_listings_table(self) -> None:
+        """Add new nullable columns without touching existing listing data."""
+        cursor = await self.db.execute("PRAGMA table_info(listings)")
+        existing_columns = {row["name"] for row in await cursor.fetchall()}
+        migrations = {
+            "variant_details": "ALTER TABLE listings ADD COLUMN variant_details TEXT",
+            "variant_type": "ALTER TABLE listings ADD COLUMN variant_type TEXT",
+            "variant_instructions": "ALTER TABLE listings ADD COLUMN variant_instructions TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in existing_columns:
+                await self.db.execute(statement)
 
     async def create_listing(
         self,
@@ -106,6 +123,9 @@ class DwarfyDatabase:
         seller_character_level: int,
         sell_roll: int,
         seller_payout: int,
+        variant_details: str | None = None,
+        variant_type: str | None = None,
+        variant_instructions: str | None = None,
     ) -> dict[str, Any]:
         """Create an available listing after a successful player sale."""
         now = utc_now_text()
@@ -115,9 +135,10 @@ class DwarfyDatabase:
                 listing_id, item_name, rarity, source, category, tags,
                 seller_user_id, seller_display_name, seller_character_name,
                 seller_character_level, sell_roll, seller_payout, cost_basis,
+                variant_details, variant_type, variant_instructions,
                 status, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
             """,
             (
                 None,
@@ -133,6 +154,9 @@ class DwarfyDatabase:
                 sell_roll,
                 seller_payout,
                 seller_payout,
+                variant_details,
+                variant_type,
+                variant_instructions,
                 now,
             ),
         )

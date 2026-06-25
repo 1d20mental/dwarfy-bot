@@ -46,6 +46,41 @@ def _valid_listing_id(value: str) -> bool:
     return bool(LISTING_ID_RE.fullmatch(value.strip()))
 
 
+def resolved_listing_name(item_name: str, details: str | None = None) -> str:
+    """Return the player-facing listing name, including variant detail text."""
+    clean_details = (details or "").strip()
+    if clean_details:
+        return f"{item_name} ({clean_details})"
+    return item_name
+
+
+def sell_validation_error(sheet_item) -> str | None:
+    """Return an ephemeral validation error for /dwarfy sell, or None."""
+    if not sheet_item.allowed:
+        return f"`{sheet_item.name}` exists in the sheet, but Allowed is FALSE."
+    if sheet_item.consumable:
+        return f"`{sheet_item.name}` is marked Consumable=TRUE. Dwarfy only buys permanent magic items."
+    if sheet_item.dwarfy_sell_eligible is False:
+        return f"`{sheet_item.name}` is marked Dwarfy Sell Eligible=FALSE and cannot be sold to Dwarfy."
+    if not is_supported_rarity(sheet_item.rarity):
+        return (
+            f"Dwarfy cannot price `{sheet_item.rarity}` items in version 1. "
+            "Supported rarities: Common, Uncommon, Rare, Very Rare, Legendary."
+        )
+    return None
+
+
+def _variant_receipt_lines(*, variant_details: str | None, variant_type: str, variant_instructions: str) -> list[str]:
+    lines: list[str] = []
+    if variant_details:
+        lines.append(f"* Variant details: {variant_details}")
+    if variant_type:
+        lines.append(f"* Variant: {variant_type}")
+    if variant_instructions:
+        lines.append(f"* Variant instructions: {variant_instructions}")
+    return lines
+
+
 class Dwarfy(commands.GroupCog, name="dwarfy"):
     """Commands under the /dwarfy group."""
 
@@ -108,6 +143,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         character="Your character's name.",
         level="Your character's level.",
         item="The magic item you are selling.",
+        details="Optional exact item details for generic/template items, such as Longsword.",
     )
     async def sell(
         self,
@@ -115,6 +151,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         character: str,
         level: app_commands.Range[int, 1, 20],
         item: str,
+        details: str | None = None,
     ) -> None:
         if not await self._require_channel(
             interaction,
@@ -128,12 +165,15 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         match = self.bot.sheet_cache.match_item(item)
         if match.choices:
             await interaction.response.send_message(
-                "I found multiple possible item matches. Please run the command again with one exact item name:\n"
+                f"{match.message or 'I found multiple possible item matches.'} Please run the command again with one exact item name:\n"
                 f"{format_item_choices(match.choices)}",
                 ephemeral=True,
             )
             return
         if match.item is None:
+            if match.message:
+                await interaction.response.send_message(match.message, ephemeral=True)
+                return
             await interaction.response.send_message(
                 f"I could not find `{item}` in the cached Bot Items sheet.",
                 ephemeral=True,
@@ -141,42 +181,36 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         sheet_item = match.item
-        if not sheet_item.allowed:
-            await interaction.response.send_message(
-                f"`{sheet_item.name}` exists in the sheet, but Allowed is FALSE.",
-                ephemeral=True,
-            )
-            return
-        if sheet_item.consumable:
-            await interaction.response.send_message(
-                f"`{sheet_item.name}` is marked Consumable=TRUE. Dwarfy only buys permanent magic items.",
-                ephemeral=True,
-            )
-            return
-        if not is_supported_rarity(sheet_item.rarity):
-            await interaction.response.send_message(
-                f"Dwarfy cannot price `{sheet_item.rarity}` items in version 1. Supported rarities: Common, Uncommon, Rare, Very Rare, Legendary.",
-                ephemeral=True,
-            )
+        validation_error = sell_validation_error(sheet_item)
+        if validation_error:
+            await interaction.response.send_message(validation_error, ephemeral=True)
             return
 
+        variant_details = (details or "").strip() or None
+        listing_name = resolved_listing_name(sheet_item.name, variant_details)
         seller = interaction.user.mention
         seller_character = character_label(character, int(level))
         sell_roll = roll_sell_price(sheet_item.rarity)
         declaration = (
-            f"{seller} declares that {seller_character} owns {sheet_item.name} and spends 5 DTP and 25gp "
+            f"{seller} declares that {seller_character} owns {listing_name} and spends 5 DTP and 25gp "
             "to sell it through Dwarfy's Shop."
         )
 
         if sell_roll.roll == 1:
+            variant_lines = _variant_receipt_lines(
+                variant_details=variant_details,
+                variant_type=sheet_item.variant_type,
+                variant_instructions=sheet_item.variant_instructions,
+            )
+            variant_block = ("\n" + "\n".join(variant_lines)) if variant_lines else ""
             output = (
                 f"{declaration}\n"
-                f"{seller} as {seller_character} receives 0gp for {sheet_item.name}.\n\n"
+                f"{seller} as {seller_character} receives 0gp for {listing_name}.\n\n"
                 "Sell Magic Item downtime:\n\n"
                 "* DTP cost: 5\n"
                 "* Gold cost: 25gp\n"
                 "* Flat d20 roll: 1\n"
-                "* Result: Sale disaster\n\n"
+                f"* Result: Sale disaster{variant_block}\n\n"
                 f"{random.choice(DISASTER_MESSAGES)}\n\n"
                 "Dwarfy's Shop receives no inventory.\n"
                 "Dwarfy's Shop makes 0gp.\n"
@@ -188,7 +222,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         listing = await self.bot.db.create_listing(
-            item_name=sheet_item.name,
+            item_name=listing_name,
             rarity=sheet_item.rarity,
             source=sheet_item.source,
             category=sheet_item.category,
@@ -199,12 +233,21 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             seller_character_level=int(level),
             sell_roll=sell_roll.roll,
             seller_payout=sell_roll.seller_payout,
+            variant_details=variant_details,
+            variant_type=sheet_item.variant_type or None,
+            variant_instructions=sheet_item.variant_instructions or None,
         )
 
+        variant_lines = _variant_receipt_lines(
+            variant_details=variant_details,
+            variant_type=sheet_item.variant_type,
+            variant_instructions=sheet_item.variant_instructions,
+        )
+        variant_block = ("\n" + "\n".join(variant_lines)) if variant_lines else ""
         output = (
             f"{declaration}\n"
-            f"{seller} as {seller_character} sells {sheet_item.name} to Dwarfy's Shop for {gp(sell_roll.seller_payout)}.\n"
-            f"Dwarfy's Shop receives {sheet_item.name} from {seller} as {seller_character} and adds it to magic inventory as {listing['listing_id']}.\n\n"
+            f"{seller} as {seller_character} sells {listing_name} to Dwarfy's Shop for {gp(sell_roll.seller_payout)}.\n"
+            f"Dwarfy's Shop receives {listing_name} from {seller} as {seller_character} and adds it to magic inventory as {listing['listing_id']}.\n\n"
             "Sell Magic Item downtime:\n\n"
             "* DTP cost: 5\n"
             "* Gold cost: 25gp\n"
@@ -214,7 +257,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"* Seller payout: {gp(sell_roll.seller_payout)}\n"
             f"* Dwarfy's cost basis: {gp(sell_roll.seller_payout)}\n"
             "* Future sale price: rolled when purchased, never below Dwarfy's cost basis\n"
-            "* Sale status: Final, no takebacks\n\n"
+            f"* Sale status: Final, no takebacks{variant_block}\n\n"
             "Adventure log reminder:\n"
             "Record this downtime activity manually on the character's adventure log."
         )
@@ -353,6 +396,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Possible final price: {price_range_text(low, high)}",
             f"Status: {listing['status']}",
         ]
+        if listing.get("variant_details"):
+            lines.append(f"Variant details: {listing['variant_details']}")
+        if listing.get("variant_type"):
+            lines.append(f"Variant: {listing['variant_type']}")
+        if listing.get("variant_instructions"):
+            lines.append(f"Variant instructions: {listing['variant_instructions']}")
 
         if listing["status"] == "sold":
             buyer = mention_user(listing["buyer_user_id"], listing["buyer_display_name"])

@@ -6,6 +6,7 @@ import difflib
 import random
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable
 
@@ -22,9 +23,12 @@ RARITY_NAMES = {
     "very rare": "Very Rare",
     "legendary": "Legendary",
     "artifact": "Artifact",
+    "none": "None",
 }
 
 SUPPORTED_LOOT_TYPES = {"Item", "Monster Component"}
+TRUE_TEXT = {"true", "yes", "y", "1"}
+FALSE_TEXT = {"false", "no", "n", "0"}
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,16 @@ class SheetItem:
     min_apl: int | None
     max_apl: int | None
     notes: str
+    roll_rarity: str = ""
+    weight: int = 1
+    session_eligible: bool = False
+    creature_type: str = ""
+    source_code: str = ""
+    source_name: str = ""
+    alternate_sources: str = ""
+    dwarfy_sell_eligible: bool | None = None
+    variant_type: str = ""
+    variant_instructions: str = ""
 
     @property
     def tags_text(self) -> str:
@@ -87,9 +101,21 @@ def normalize_rarity(value: object) -> str:
 
 
 def parse_bool(value: object) -> bool:
-    """Parse the TRUE/FALSE style cells used by the sheet."""
+    """Parse TRUE/FALSE-ish cells used by older required sheet columns."""
     text = _clean(value).casefold()
-    return text in {"true", "yes", "y", "1"}
+    return text in TRUE_TEXT
+
+
+def parse_optional_bool(value: object) -> bool | None:
+    """Parse a TRUE/FALSE cell and return None for blank or invalid text."""
+    text = _clean(value).casefold()
+    if not text:
+        return None
+    if text in TRUE_TEXT:
+        return True
+    if text in FALSE_TEXT:
+        return False
+    return None
 
 
 def parse_optional_int(value: object) -> int | None:
@@ -97,6 +123,80 @@ def parse_optional_int(value: object) -> int | None:
     if not text:
         return None
     return int(float(text))
+
+
+def parse_weight(value: object, *, row_number: int, warnings: list[str]) -> int:
+    """Parse the Weight column.
+
+    Bad weights warn and become 1 so a sheet typo never crashes reload.
+    """
+    text = _clean(value)
+    if not text:
+        return 1
+
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        warnings.append(f"Bot Items row {row_number} has invalid Weight {text!r}; defaulted to 1.")
+        return 1
+
+    if number != number.to_integral_value() or number < 1:
+        warnings.append(f"Bot Items row {row_number} has invalid Weight {text!r}; defaulted to 1.")
+        return 1
+
+    return int(number)
+
+
+def parse_session_eligible(
+    value: object,
+    *,
+    row_number: int,
+    roll_rarity: str,
+    header_exists: bool,
+    warnings: list[str],
+) -> bool:
+    """Parse Session Eligible with the workbook's inference rules."""
+    if not header_exists:
+        return bool(roll_rarity)
+
+    text = _clean(value)
+    if not text:
+        return bool(roll_rarity)
+
+    parsed = parse_optional_bool(text)
+    if parsed is None:
+        warnings.append(
+            f"Bot Items row {row_number} has invalid Session Eligible {text!r}; row is ineligible."
+        )
+        return False
+    return parsed
+
+
+def parse_dwarfy_sell_eligible(
+    value: object,
+    *,
+    row_number: int,
+    header_exists: bool,
+    warnings: list[str],
+) -> bool | None:
+    """Parse optional Dwarfy Sell Eligible.
+
+    None means the column/cell did not express an opinion.
+    """
+    if not header_exists:
+        return None
+
+    text = _clean(value)
+    if not text:
+        return None
+
+    parsed = parse_optional_bool(text)
+    if parsed is None:
+        warnings.append(
+            f"Bot Items row {row_number} has invalid Dwarfy Sell Eligible {text!r}; defaulted to FALSE."
+        )
+        return False
+    return parsed
 
 
 def normalize_loot_type(value: object) -> str:
@@ -115,8 +215,18 @@ def parse_tags(value: object) -> tuple[str, ...]:
     )
 
 
+def infer_creature_type(item_name: str) -> str:
+    """Extract a final parenthetical creature type from a trigger item name."""
+    match = re.search(r"\(([^()]+)\)\s*$", item_name)
+    return match.group(1).strip() if match else ""
+
+
 def _header_map(headers: list[str]) -> dict[str, int]:
     return {_header_key(header): index for index, header in enumerate(headers)}
+
+
+def _has_header(headers: dict[str, int], column: str) -> bool:
+    return column.casefold() in headers
 
 
 def _cell(row: list[str], headers: dict[str, int], column: str) -> str:
@@ -133,6 +243,28 @@ def _score_match(query: str, candidate: str) -> float:
     if query_norm and query_norm in candidate_norm:
         ratio = max(ratio, 0.82)
     return ratio
+
+
+def _critical_match_key(item: SheetItem) -> tuple[str, str, bool, bool, bool | None]:
+    return (
+        item.name.casefold().strip(),
+        item.rarity,
+        item.consumable,
+        item.allowed,
+        item.dwarfy_sell_eligible,
+    )
+
+
+def _unique_items_by_name(items: Iterable[SheetItem]) -> tuple[SheetItem, ...]:
+    seen: set[str] = set()
+    unique: list[SheetItem] = []
+    for item in items:
+        key = item.name.casefold().strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return tuple(unique)
 
 
 def _parse_roll_range(value: str) -> tuple[int, int]:
@@ -177,7 +309,7 @@ class SheetCache:
         self.loaded = False
 
     def reload(self) -> None:
-        """Load both configured tabs from Google Sheets."""
+        """Load both configured runtime tabs from Google Sheets."""
         self.loaded = False
         self.items = []
         self.components = []
@@ -213,21 +345,31 @@ class SheetCache:
         expected = [
             "Item Name",
             "Rarity",
+            "Roll Rarity",
+            "Weight",
             "Consumable",
             "Allowed",
             "Loot Type",
+            "Creature Type",
             "Source",
+            "Source Code",
+            "Source Name",
             "Category",
             "Tags",
             "Min APL",
             "Max APL",
-            "Notes",
+            "Session Eligible",
         ]
         for column in expected:
             if column.casefold() not in headers:
                 self.warnings.append(
                     f"{self.bot_items_tab} is missing expected column: {column}"
                 )
+
+        has_roll_rarity = _has_header(headers, "Roll Rarity")
+        has_weight = _has_header(headers, "Weight")
+        has_session_eligible = _has_header(headers, "Session Eligible")
+        has_dwarfy_sell_eligible = _has_header(headers, "Dwarfy Sell Eligible")
 
         items: list[SheetItem] = []
         for row_number, row in enumerate(values[1:], start=2):
@@ -252,18 +394,57 @@ class SheetCache:
                 )
                 continue
 
+            rarity = normalize_rarity(_cell(row, headers, "Rarity"))
+            roll_rarity = (
+                normalize_rarity(_cell(row, headers, "Roll Rarity"))
+                if has_roll_rarity
+                else rarity
+            )
+            creature_type = _cell(row, headers, "Creature Type")
+            if loot_type == "Monster Component" and not creature_type:
+                creature_type = infer_creature_type(name)
+
+            weight = (
+                parse_weight(_cell(row, headers, "Weight"), row_number=row_number, warnings=self.warnings)
+                if has_weight
+                else 1
+            )
+            session_eligible = parse_session_eligible(
+                _cell(row, headers, "Session Eligible"),
+                row_number=row_number,
+                roll_rarity=roll_rarity,
+                header_exists=has_session_eligible,
+                warnings=self.warnings,
+            )
+            dwarfy_sell_eligible = parse_dwarfy_sell_eligible(
+                _cell(row, headers, "Dwarfy Sell Eligible"),
+                row_number=row_number,
+                header_exists=has_dwarfy_sell_eligible,
+                warnings=self.warnings,
+            )
+
             items.append(
                 SheetItem(
                     name=name,
-                    rarity=normalize_rarity(_cell(row, headers, "Rarity")),
+                    rarity=rarity,
+                    roll_rarity=roll_rarity,
+                    weight=weight,
                     consumable=parse_bool(_cell(row, headers, "Consumable")),
                     allowed=parse_bool(_cell(row, headers, "Allowed")),
                     loot_type=loot_type,
+                    creature_type=creature_type,
                     source=_cell(row, headers, "Source"),
+                    source_code=_cell(row, headers, "Source Code"),
+                    source_name=_cell(row, headers, "Source Name"),
+                    alternate_sources=_cell(row, headers, "Alternate Sources"),
                     category=_cell(row, headers, "Category"),
                     tags=parse_tags(_cell(row, headers, "Tags")),
                     min_apl=min_apl,
                     max_apl=max_apl,
+                    session_eligible=session_eligible,
+                    dwarfy_sell_eligible=dwarfy_sell_eligible,
+                    variant_type=_cell(row, headers, "Variant Type"),
+                    variant_instructions=_cell(row, headers, "Variant Instructions"),
                     notes=_cell(row, headers, "Notes"),
                 )
             )
@@ -300,24 +481,43 @@ class SheetCache:
             )
         return components
 
-    def match_item(self, query: str) -> ItemMatch:
-        """Find an item by exact match first, then by difflib fuzzy matching."""
-        query_norm = query.casefold().strip()
+    def _canonical_exact_match(self, query_norm: str) -> ItemMatch:
         exact_matches = [
             item for item in self.items if item.name.casefold().strip() == query_norm
         ]
-        if exact_matches:
-            return ItemMatch(item=exact_matches[0])
+        if not exact_matches:
+            return ItemMatch(item=None)
 
-        scored = sorted(
-            (
-                (_score_match(query, item.name), item)
-                for item in self.items
-                if _score_match(query, item.name) >= 0.58
-            ),
-            key=lambda pair: pair[0],
-            reverse=True,
-        )
+        critical_keys = {_critical_match_key(item) for item in exact_matches}
+        if len(critical_keys) > 1:
+            display_name = exact_matches[0].name
+            return ItemMatch(
+                item=None,
+                message=(
+                    f"Multiple Bot Items rows named `{display_name}` conflict on Dwarfy-critical data. "
+                    "Ask a maintainer to align Rarity, Consumable, Allowed, and Dwarfy Sell Eligible before selling it."
+                ),
+            )
+
+        return ItemMatch(item=exact_matches[0])
+
+    def match_item(self, query: str) -> ItemMatch:
+        """Find an item by exact match first, then by difflib fuzzy matching."""
+        query_norm = query.casefold().strip()
+        exact = self._canonical_exact_match(query_norm)
+        if exact.item is not None or exact.message:
+            return exact
+
+        best_by_name: dict[str, tuple[float, SheetItem]] = {}
+        for item in self.items:
+            score = _score_match(query, item.name)
+            if score < 0.58:
+                continue
+            key = item.name.casefold().strip()
+            if key not in best_by_name or score > best_by_name[key][0]:
+                best_by_name[key] = (score, item)
+
+        scored = sorted(best_by_name.values(), key=lambda pair: pair[0], reverse=True)
         if not scored:
             return ItemMatch(item=None, message="No matching item was found.")
 
@@ -325,11 +525,11 @@ class SheetCache:
         second_score = scored[1][0] if len(scored) > 1 else 0.0
 
         if top_score >= 0.86 and top_score - second_score >= 0.08:
-            return ItemMatch(item=top_item)
+            return self._canonical_exact_match(top_item.name.casefold().strip())
         if len(scored) == 1 and top_score >= 0.65:
-            return ItemMatch(item=top_item)
+            return self._canonical_exact_match(top_item.name.casefold().strip())
 
-        choices = tuple(item for _score, item in scored[:8])
+        choices = _unique_items_by_name(item for _score, item in scored[:8])
         return ItemMatch(
             item=None,
             choices=choices,
@@ -337,14 +537,18 @@ class SheetCache:
         )
 
     def loot_pool(self, *, rarity: str, consumable: bool, apl: int) -> list[SheetItem]:
-        """Return allowed items matching rarity, consumable flag, and APL."""
+        """Return session-eligible items matching roll rarity, slot type, and APL."""
         pool: list[SheetItem] = []
         for item in self.items:
             if not item.allowed:
                 continue
+            if not item.session_eligible:
+                continue
+            if not item.roll_rarity:
+                continue
             if item.consumable != consumable:
                 continue
-            if item.rarity != rarity:
+            if item.roll_rarity != rarity:
                 continue
             if item.min_apl is not None and item.min_apl > apl:
                 continue
@@ -423,5 +627,8 @@ class SheetCache:
 
 
 def format_item_choices(items: Iterable[SheetItem]) -> str:
-    """Return a short list of item names for fuzzy-match errors."""
-    return "\n".join(f"- {item.name} ({item.rarity}, {item.source or 'No source'})" for item in items)
+    """Return a short unique list of item names for fuzzy-match errors."""
+    return "\n".join(
+        f"- {item.name} ({item.rarity}, {item.source or 'No source'})"
+        for item in _unique_items_by_name(items)
+    )

@@ -47,12 +47,24 @@ class InvalidCreatureTypeError(LootError):
 
 
 @dataclass(frozen=True)
+class WeightedSelection:
+    item: SheetItem
+    ticket: int
+    total_weight: int
+    eligible_entry_count: int
+
+
+@dataclass(frozen=True)
 class LootSlot:
     label: str
     d100: int
     rarity: str
-    item: SheetItem | None
+    selection: WeightedSelection | None
     fallback_note: str | None = None
+
+    @property
+    def item(self) -> SheetItem | None:
+        return self.selection.item if self.selection else None
 
 
 def tier_for_apl(apl: int) -> tuple[int, str]:
@@ -74,11 +86,62 @@ def rarity_from_roll(tier: int, d100: int) -> str:
     raise LootError(f"No rarity table result for roll {d100}.")
 
 
+def pick_weighted_item(pool: list[SheetItem]) -> WeightedSelection:
+    """Pick one item using stable weighted ticket ranges."""
+    if not pool:
+        raise LootError("Cannot pick a weighted item from an empty pool.")
+
+    total_weight = sum(item.weight for item in pool)
+    ticket = random.randint(1, total_weight)
+    cumulative = 0
+    for item in pool:
+        cumulative += item.weight
+        if ticket <= cumulative:
+            return WeightedSelection(
+                item=item,
+                ticket=ticket,
+                total_weight=total_weight,
+                eligible_entry_count=len(pool),
+            )
+
+    # This should be unreachable unless item weights are mutated mid-loop.
+    return WeightedSelection(
+        item=pool[-1],
+        ticket=ticket,
+        total_weight=total_weight,
+        eligible_entry_count=len(pool),
+    )
+
+
 def _tags_text(item: SheetItem) -> str:
     return item.tags_text or "none"
 
 
-def _choose_item(
+def _apply_tag_filter(
+    *,
+    pool: list[SheetItem],
+    rarity: str,
+    consumable: bool,
+    tag: str | None,
+) -> tuple[list[SheetItem], str | None]:
+    if not tag:
+        return pool, None
+
+    tag_norm = tag.casefold().strip()
+    tagged_pool = [item for item in pool if tag_norm in item.tags]
+    if tagged_pool:
+        return tagged_pool, None
+
+    slot_word = "consumable" if consumable else "permanent"
+    fallback_word = "consumables" if consumable else "permanent items"
+    note = (
+        f'Note: No tagged {rarity} {slot_word} items found for tag "{tag}"; '
+        f"used all allowed {rarity} {fallback_word} instead."
+    )
+    return pool, note
+
+
+def select_loot_item(
     *,
     cache: SheetCache,
     rarity: str,
@@ -86,37 +149,47 @@ def _choose_item(
     apl: int,
     tag: str | None,
     used_permanent_names: set[str],
-) -> tuple[SheetItem | None, str | None]:
+) -> tuple[WeightedSelection | None, str | None]:
+    """Build the final pool and select an item with weighted randomness."""
     pool = cache.loot_pool(rarity=rarity, consumable=consumable, apl=apl)
     if not pool:
         return None, None
 
-    fallback_note = None
-    chosen_pool = pool
-    if tag:
-        tag_norm = tag.casefold().strip()
-        tagged_pool = [item for item in pool if tag_norm in item.tags]
-        if tagged_pool:
-            chosen_pool = tagged_pool
-        else:
-            slot_word = "consumable" if consumable else "permanent"
-            fallback_word = "consumables" if consumable else "permanent items"
-            fallback_note = (
-                f'Note: No tagged {rarity} {slot_word} items found for tag "{tag}"; '
-                f"used all allowed {rarity} {fallback_word} instead."
-            )
+    final_pool, fallback_note = _apply_tag_filter(
+        pool=pool,
+        rarity=rarity,
+        consumable=consumable,
+        tag=tag,
+    )
 
     if not consumable:
         unused_pool = [
-            item for item in chosen_pool if item.name.casefold() not in used_permanent_names
+            item for item in final_pool if item.name.casefold() not in used_permanent_names
         ]
         if unused_pool:
-            chosen_pool = unused_pool
+            final_pool = unused_pool
 
-    item = random.choice(chosen_pool)
+    selection = pick_weighted_item(final_pool)
     if not consumable:
-        used_permanent_names.add(item.name.casefold())
-    return item, fallback_note
+        used_permanent_names.add(selection.item.name.casefold())
+    return selection, fallback_note
+
+
+def _weighted_audit_line(selection: WeightedSelection) -> str:
+    return (
+        f"Eligible entries: {selection.eligible_entry_count} | "
+        f"Total weight: {selection.total_weight} | "
+        f"Weighted item roll: {selection.ticket}/{selection.total_weight}"
+    )
+
+
+def _variant_lines(item: SheetItem) -> list[str]:
+    lines: list[str] = []
+    if item.variant_type:
+        lines.append(f"Variant: {item.variant_type}")
+    if item.variant_instructions:
+        lines.append(f"Instructions: {item.variant_instructions}")
+    return lines
 
 
 def _format_item_slot(
@@ -127,25 +200,29 @@ def _format_item_slot(
     apl: int,
     creature_type: str | None,
 ) -> str:
-    if slot.item is None:
+    if slot.selection is None:
         consumable_text = "TRUE" if consumable else "FALSE"
         return (
             f"{slot.label}: {slot.d100} -> {slot.rarity} -> NO MATCH FOUND\n"
-            f"Reason: No Allowed=TRUE, Consumable={consumable_text}, "
-            f"{slot.rarity} items found for APL {apl}."
+            f"Reason: No Allowed=TRUE, Session Eligible=TRUE, Consumable={consumable_text}, "
+            f"Roll Rarity={slot.rarity} items found for APL {apl}."
         )
 
-    if slot.item.loot_type == "Monster Component":
+    item = slot.selection.item
+    if item.loot_type == "Monster Component":
+        selected_creature_type = creature_type or item.creature_type or None
         try:
-            component = cache.roll_monster_component(creature_type)
+            component = cache.roll_monster_component(selected_creature_type)
         except (RuntimeError, ValueError) as exc:
             return (
                 f"{slot.label}: {slot.d100} -> {slot.rarity} -> Monster Component\n"
+                f"{_weighted_audit_line(slot.selection)}\n"
                 f"Reason: {exc}"
             )
         component_roll = component.d100 if component.d100 is not None else "random"
         lines = [
             f"{slot.label}: {slot.d100} -> {slot.rarity} -> Monster Component",
+            _weighted_audit_line(slot.selection),
             (
                 f"Creature Type: {component.creature_type} | Component Roll: "
                 f"{component_roll} | Component: {component.component}"
@@ -156,10 +233,13 @@ def _format_item_slot(
             lines.append(f"Note: {component.note}")
         return "\n".join(lines)
 
-    return (
-        f"{slot.label}: {slot.d100} -> {slot.rarity} -> {slot.item.name}\n"
-        f"Source: {slot.item.source or 'Unknown'} | Tags: {_tags_text(slot.item)}"
-    )
+    lines = [
+        f"{slot.label}: {slot.d100} -> {slot.rarity} -> {item.name}",
+        _weighted_audit_line(slot.selection),
+        f"Source: {item.source or 'Unknown'} | Tags: {_tags_text(item)}",
+    ]
+    lines.extend(_variant_lines(item))
+    return "\n".join(lines)
 
 
 def build_session_loot_output(
@@ -202,7 +282,7 @@ def build_session_loot_output(
     for index in range(1, permanent_slots + 1):
         d100 = random.randint(1, 100)
         rarity = rarity_from_roll(tier, d100)
-        item, note = _choose_item(
+        selection, note = select_loot_item(
             cache=cache,
             rarity=rarity,
             consumable=False,
@@ -212,12 +292,12 @@ def build_session_loot_output(
         )
         if note and note not in fallback_notes:
             fallback_notes.append(note)
-        permanent.append(LootSlot(f"Permanent {index}", d100, rarity, item, note))
+        permanent.append(LootSlot(f"Permanent {index}", d100, rarity, selection, note))
 
     for index in range(1, consumable_slots + 1):
         d100 = random.randint(1, 100)
         rarity = rarity_from_roll(tier, d100)
-        item, note = _choose_item(
+        selection, note = select_loot_item(
             cache=cache,
             rarity=rarity,
             consumable=True,
@@ -227,7 +307,7 @@ def build_session_loot_output(
         )
         if note and note not in fallback_notes:
             fallback_notes.append(note)
-        consumable.append(LootSlot(f"Consumable {index}", d100, rarity, item, note))
+        consumable.append(LootSlot(f"Consumable {index}", d100, rarity, selection, note))
 
     lines = [
         "\U0001F381 Session Loot",

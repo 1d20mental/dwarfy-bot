@@ -104,6 +104,28 @@ something@your-project.iam.gserviceaccount.com
 
 Viewer access is enough because the bot only reads the sheet.
 
+## Workbook Tabs
+
+The workbook can contain these tabs:
+
+- `Start Here`
+- `Bot Items`
+- `Monster Components`
+- `Validation Summary`
+- `Weight Audit`
+- `Source Index`
+- `Source Mapping Audit`
+- `Deleted Rows`
+
+At runtime the bot only reads:
+
+- `Bot Items`
+- `Monster Components`
+
+The other tabs are human/admin reference tabs. They help you maintain the sheet, but the bot should still run without reading them.
+
+`Source Index` is the human-readable index of source abbreviations and full book names. If you add a future source, usually you only need to add it to `Source Index` and then use that player-facing `Source` label in `Bot Items`. No code change should be needed.
+
 ## `Bot Items` Columns
 
 The `Bot Items` tab should have these headers:
@@ -111,30 +133,103 @@ The `Bot Items` tab should have these headers:
 ```text
 Item Name
 Rarity
+Roll Rarity
+Weight
 Consumable
 Allowed
 Loot Type
+Creature Type
 Source
+Source Code
+Source Name
+Alternate Sources
 Category
 Tags
 Min APL
 Max APL
+Session Eligible
+Dwarfy Sell Eligible
+Variant Type
+Variant Instructions
 Notes
 ```
 
 Rules:
 
 - Header matching is case-insensitive and ignores extra spaces.
+- The bot tolerates extra columns and ignores columns it does not need.
+- Do not rename required columns.
+- `Item Name` is the name shown in Discord.
+- `Rarity` is the actual item rarity and is used by Dwarfy pricing.
+- `Roll Rarity` is the rarity bucket used by `/sessionloot`.
+- Blank `Roll Rarity` excludes a row from session loot.
+- If the whole `Roll Rarity` column is missing, the bot falls back to `Rarity` for older sheets.
+- `Weight` is relative probability for session loot.
+- Weight totals do not need to equal 100.
+- Blank `Weight` defaults to `1`.
+- Invalid `Weight` creates a reload warning and defaults to `1`.
 - `Allowed` should be `TRUE` or `FALSE`.
+- `Allowed=FALSE` excludes the row from `/sessionloot` and blocks `/dwarfy sell`.
+- `Session Eligible=FALSE` excludes the row from `/sessionloot`.
 - `Consumable` should be `TRUE` or `FALSE`.
+- `Consumable=TRUE` is for consumable loot slots.
+- `Consumable=FALSE` is for permanent loot slots.
 - Blank `Loot Type` means `Item`.
 - Supported `Loot Type` values are `Item` and `Monster Component`.
+- `Creature Type` can be used by Monster Component trigger rows.
+- `Source` is what players see in Discord. Keep player-facing labels here, such as `DMG 2024`, `PHB 2024`, `XGE`, `TCE`, `BMT`, `FRHOF`, or `HGtMH`.
+- `Source Code` is only for reference. It is not shown in normal public loot output.
+- `Source Name` is only for reference. It is not shown in normal public loot output.
+- `Alternate Sources` is reference/future-use information.
+- `Tags` are comma-separated and case-insensitive.
 - Blank `Min APL` means no minimum.
 - Blank `Max APL` means no maximum.
-- Tags are comma-separated.
 - Rarity values are normalized, so `very rare`, `Very rare`, and `Very Rare` all become `Very Rare`.
+- `Dwarfy Sell Eligible=FALSE` blocks `/dwarfy sell` for that row.
+- `Variant Type` describes generic/template rows, such as `Generic Weapon`, `Generic Armor`, `Generic Shield`, `Generic Ammunition`, `Generic Item`, or `Specific Item`.
+- `Variant Instructions` tells the DM/player how to resolve a generic row.
+- `Notes` are for human reference.
 
 Only permanent magic items can be sold to Dwarfy with `/dwarfy sell`. Consumables are valid for `/sessionloot`, but not for shop sales.
+
+Generic/template items stay as one row. For example, `+1 Weapon` should stay as `+1 Weapon`; the bot should not generate every possible longsword, rapier, or bow in code. Use `Variant Type` and `Variant Instructions` to tell the DM/player how to resolve it.
+
+Example:
+
+```text
+Item Name: +1 Weapon
+Variant Type: Generic Weapon
+Variant Instructions: Choose any valid weapon when awarded.
+```
+
+For `/dwarfy sell`, players can use the optional `details` field:
+
+```text
+item: +1 Weapon
+details: Longsword
+```
+
+The shop listing will show:
+
+```text
++1 Weapon (Longsword)
+```
+
+## Weighting Example
+
+Weights are ticket ranges, not percentages.
+
+Bag of Holding has Weight `2`.
+Boots of Elvenkind has Weight `1`.
+Cloak of Protection has Weight `3`.
+
+The total weight is `6`.
+
+- Tickets `1-2` select Bag of Holding.
+- Ticket `3` selects Boots of Elvenkind.
+- Tickets `4-6` select Cloak of Protection.
+
+Changing a `Weight` cell and running `/dwarfy reload` updates future session-loot probabilities.
 
 ## `Monster Components` Columns
 
