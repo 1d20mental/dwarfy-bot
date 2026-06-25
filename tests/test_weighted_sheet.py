@@ -422,6 +422,18 @@ class MonsterComponentTests(unittest.TestCase):
 
 
 class MatchingAndDwarfyTests(unittest.TestCase):
+    def test_browse_rarity_filter_uses_discord_choices(self):
+        from cogs.dwarfy import BROWSE_RARITY_CHOICES, BROWSE_RARITY_VALUES
+
+        self.assertEqual(
+            [choice.value for choice in BROWSE_RARITY_CHOICES],
+            ["Common", "Uncommon", "Rare", "Very Rare", "Legendary"],
+        )
+        self.assertEqual(
+            BROWSE_RARITY_VALUES,
+            {"Common", "Uncommon", "Rare", "Very Rare", "Legendary"},
+        )
+
     def test_sell_item_autocomplete_returns_unique_clean_names(self):
         cache = make_cache([
             item("Ring of Protection", rarity="Rare", roll_rarity="Uncommon"),
