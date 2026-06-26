@@ -485,6 +485,17 @@ class DwarfySaleMechanicTests(unittest.TestCase):
             self.assertEqual(result.seller_payout, payout)
             self.assertIn(text, result.result_text)
 
+    def test_broker_result_line_is_scannable_near_top(self):
+        from cogs.dwarfy import broker_sale_result_line
+
+        with patch("services.pricing.random.randint", return_value=18):
+            result = broker_sale_result_line(roll_broker_price("Rare"))
+
+        self.assertEqual(
+            result,
+            "🎲 Broker roll: 18 - Strong buyer, 60% of base price - payout 2,400gp.",
+        )
+
     def test_actual_rarity_is_used_for_direct_and_broker_pricing(self):
         row = item(name="Rare Rolled Low", rarity="Rare", roll_rarity="Uncommon")
 

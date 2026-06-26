@@ -102,6 +102,11 @@ def source_with_page(source: str | None, page: str | None) -> str:
     return source or "Unknown"
 
 
+def broker_sale_result_line(sale: Any) -> str:
+    """Put the broker d20 result near the top of the public receipt."""
+    return f"🎲 Broker roll: {sale.roll} - {sale.result_text} - payout {gp(sale.seller_payout)}."
+
+
 def sell_validation_error(sheet_item) -> str | None:
     """Return an ephemeral validation error for /dwarfy sell, or None."""
     if not sheet_item.allowed:
@@ -569,6 +574,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             output = (
                 f"{declaration}\n\n"
+                f"{broker_sale_result_line(broker_roll)}\n\n"
                 "Broker Magic Item downtime:\n\n"
                 "Method: Brokered sale\n"
                 "DTP cost: 5\n"
@@ -628,6 +634,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         )
         output = (
             f"{declaration}\n\n"
+            f"{broker_sale_result_line(broker_roll)}\n\n"
             f"{context['seller']} as {context['seller_character']} brokers {context['listing_name']} "
             f"through Dwarfy's Shop for {gp(broker_roll.seller_payout)}.\n"
             f"Dwarfy's Shop receives {context['listing_name']} and adds it to magic inventory as {listing['listing_id']}.\n\n"
