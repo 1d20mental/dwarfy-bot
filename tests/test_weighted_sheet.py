@@ -1491,13 +1491,13 @@ class ClassifiedsTests(unittest.TestCase):
         self.assertEqual(parse_classified_id("DWC-17 - Bag of Holding"), "DWC-00017")
         self.assertEqual(parse_classified_id("`dwc 00042`"), "DWC-00042")
 
-    def test_classified_fee_is_buyer_paid_twenty_percent(self):
+    def test_classified_fee_is_seller_paid_twenty_percent(self):
         from cogs.dwarfy import classified_fee_for_price
 
         self.assertEqual(classified_fee_for_price(410), 82)
         self.assertEqual(classified_fee_for_price(1), 0)
 
-    def test_classified_trade_log_shows_seller_fee_and_buyer_total(self):
+    def test_classified_trade_log_shows_seller_paid_commission(self):
         from cogs.dwarfy import build_classified_trade_log
 
         row = {
@@ -1510,14 +1510,14 @@ class ClassifiedsTests(unittest.TestCase):
             "seller_character_level": 9,
             "asking_price": 410,
             "broker_fee": 82,
-            "buyer_total": 492,
+            "buyer_total": 410,
         }
 
         output = build_classified_trade_log(row, buyer="@Buyer", buyer_character="Azaez (3)")
 
-        self.assertIn("@Buyer as Azaez (3) pays 492gp total", output)
-        self.assertIn("410gp to <@123> as Beto Dread (9)", output)
-        self.assertIn("82gp to Dwarfy's Shop", output)
+        self.assertIn("@Buyer as Azaez (3) pays 410gp to <@123> as Beto Dread (9)", output)
+        self.assertIn("<@123> as Beto Dread (9) receives 328gp", output)
+        self.assertIn("Dwarfy's Shop receives 82gp from <@123> as Beto Dread (9)", output)
 
     def test_classified_browse_output_is_private_copyable_text(self):
         from cogs.dwarfy import build_classified_browse_output
@@ -1529,7 +1529,7 @@ class ClassifiedsTests(unittest.TestCase):
             "rarity": "Uncommon",
             "asking_price": 160,
             "broker_fee": 32,
-            "buyer_total": 192,
+            "buyer_total": 160,
             "expires_at": "2026-07-26T00:00:00+00:00",
         }
 
@@ -1537,7 +1537,9 @@ class ClassifiedsTests(unittest.TestCase):
 
         self.assertIn("Dwarfy's Classifieds has 1 open posting", output)
         self.assertIn("DWC-00001 - +1 Weapon (Longsword) - Uncommon", output)
-        self.assertIn("Buyer total: 192gp", output)
+        self.assertIn("Buyer price: 160gp", output)
+        self.assertIn("Seller receives: 128gp", output)
+        self.assertIn("Dwarfy commission: 32gp", output)
         self.assertIn("Held by Dwarfy until", output)
 
     def test_classified_database_flow_records_fee_ledger_and_export(self):
@@ -1562,7 +1564,7 @@ class ClassifiedsTests(unittest.TestCase):
                         seller_character_level=9,
                         asking_price=410,
                         broker_fee=82,
-                        buyer_total=492,
+                        buyer_total=410,
                     )
                     open_before = await db.list_open_classifieds()
                     sold = await db.mark_classified_sold(
@@ -1617,7 +1619,7 @@ class ClassifiedsTests(unittest.TestCase):
                         seller_character_level=9,
                         asking_price=410,
                         broker_fee=82,
-                        buyer_total=492,
+                        buyer_total=410,
                     )
                     expired_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
                     await db.db.execute(
@@ -1695,7 +1697,7 @@ class ClassifiedsTests(unittest.TestCase):
                         seller_character_level=1,
                         asking_price=50,
                         broker_fee=10,
-                        buyer_total=60,
+                        buyer_total=50,
                     )
                     voided = await db.void_classified(row["classified_id"], "test cleanup")
                     open_after = await db.list_open_classifieds()
@@ -1765,6 +1767,16 @@ class HelpCommandTests(unittest.TestCase):
         from cogs.dwarfy import build_help_embed
 
         self.assertEqual(build_help_embed("bogus").title, "Dwarfy Bot Help")
+
+    def test_help_classifieds_mentions_seller_paid_commission(self):
+        from cogs.dwarfy import build_help_embed
+
+        embed = build_help_embed("classifieds")
+        text = "\n".join([embed.description or ""] + [field.value for field in embed.fields])
+
+        self.assertIn("The price is what the buyer pays", text)
+        self.assertIn("withholds a 20% commission", text)
+        self.assertIn("seller receives the buyer price minus", text.casefold())
 
     def test_help_channel_topic_explains_privacy(self):
         from cogs.dwarfy import build_help_embed

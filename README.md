@@ -17,7 +17,7 @@ Google Sheets is the master item reference. SQLite is the live shop inventory an
 - Lets players sell permanent magic items directly with `/dwarfy sell`.
 - Lets players broker permanent magic-item sales with `/dwarfy broker`.
 - Lets players browse, inspect, and buy Dwarfy shop listings.
-- Lets players post and buy player-to-player classified listings with Dwarfy taking a buyer-paid broker fee.
+- Lets players post and buy player-to-player classified listings with Dwarfy withholding a seller-paid broker commission.
 - Lets admins/mods run `/dwarfy stats`, `/dwarfy history`, `/dwarfy export`, `/dwarfy void`, and `/dwarfy reload`.
 - Rolls session loot with `/sessionloot`.
 
@@ -372,7 +372,7 @@ After that, test the shop flow:
 4. In the shop channel, run `/dwarfy browse`.
 5. Run `/dwarfy inspect listing:DWF-00001`.
 6. Run `/dwarfy buy listing:DWF-00001 character:Other Name level:5 gold:2000`.
-7. Try `/dwarfy classified_post` and `/dwarfy classified_browse` in the shop channel.
+7. Try `/dwarfy classified_post` and `/dwarfy classified_browse` in the classifieds channel, or the shop channel if `DWARFY_CLASSIFIED_CHANNEL_ID` is blank.
 
 ## Commands
 
@@ -452,15 +452,15 @@ Dwarfy Classifieds is a player-to-player board. Dwarfy does not own the item and
 
 Dwarfy takes custody of the item for 30 days from posting. During that hold, the seller cannot use, sell, trade, or withdraw the item. If nobody buys it within 30 days, the bot returns the item to the seller for free and posts a return notice in the classifieds channel.
 
-Dwarfy adds a buyer-paid `20%` broker fee:
+Dwarfy withholds a `20%` commission from the seller when the item sells. The buyer pays only the posted price:
 
 ```text
-Seller asks: 410gp
-Dwarfy fee: 82gp
-Buyer total: 492gp
+Buyer price: 410gp
+Dwarfy commission: 82gp
+Seller receives: 328gp
 ```
 
-`/dwarfy classified_browse` and `/dwarfy classified_inspect` are private. `/dwarfy classified_buy` is public and produces copyable trade-log text showing what the buyer pays the seller and what the buyer pays Dwarfy.
+`/dwarfy classified_browse` and `/dwarfy classified_inspect` are private. `/dwarfy classified_buy` is public and produces copyable trade-log text showing what the buyer pays and what Dwarfy withholds from the seller side.
 
 Classified IDs use `DWC-00001`, `DWC-00002`, and so on. Inventory listings still use `DWF-00001`.
 

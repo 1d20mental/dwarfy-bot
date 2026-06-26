@@ -1008,7 +1008,7 @@ class DwarfyDatabase:
             profit_change=0,
             notes=(
                 f"Classified posted by {seller_display_name} as "
-                f"{seller_character_name} for {asking_price}gp plus {broker_fee}gp fee."
+                f"{seller_character_name} at {asking_price}gp buyer price with {broker_fee}gp seller-paid commission."
             ),
             commit=False,
         )
@@ -1122,7 +1122,7 @@ class DwarfyDatabase:
             cash_change=int(classified["broker_fee"]),
             inventory_cost_change=0,
             profit_change=int(classified["broker_fee"]),
-            notes=f"Classified broker fee for {classified['item_name']}.",
+            notes=f"Seller-paid classified commission for {classified['item_name']}.",
             commit=False,
         )
         await self.db.commit()

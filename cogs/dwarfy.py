@@ -972,8 +972,26 @@ def build_sell_receipt(
 
 
 def classified_fee_for_price(asking_price: int) -> int:
-    """Dwarfy's classifieds broker fee, paid by the buyer."""
+    """Dwarfy's classifieds commission, withheld from the seller payout."""
     return (asking_price * CLASSIFIED_FEE_PERCENT) // 100
+
+
+def classified_buyer_price(classified: dict[str, Any]) -> int:
+    """Return the price the buyer pays for a classified posting."""
+    return int(classified.get("asking_price") or 0)
+
+
+def classified_commission(classified: dict[str, Any]) -> int:
+    """Return Dwarfy's seller-paid classified commission."""
+    stored_fee = classified.get("broker_fee")
+    if stored_fee is not None:
+        return int(stored_fee)
+    return classified_fee_for_price(classified_buyer_price(classified))
+
+
+def classified_seller_net(classified: dict[str, Any]) -> int:
+    """Return the seller's proceeds after Dwarfy withholds commission."""
+    return max(0, classified_buyer_price(classified) - classified_commission(classified))
 
 
 def build_classified_embed(classified: dict[str, Any]) -> discord.Embed:
@@ -993,9 +1011,9 @@ def build_classified_embed(classified: dict[str, Any]) -> discord.Embed:
     embed.add_field(name="Source", value=source_with_page(classified.get("source"), classified.get("page")), inline=True)
     embed.add_field(name="Status", value=classified_status_text(classified), inline=True)
     embed.add_field(name="Seller", value=f"{seller} as {seller_character}", inline=False)
-    embed.add_field(name="Seller Receives", value=gp(int(classified.get("asking_price") or 0)), inline=True)
-    embed.add_field(name="Dwarfy Fee", value=gp(int(classified.get("broker_fee") or 0)), inline=True)
-    embed.add_field(name="Buyer Total", value=gp(int(classified.get("buyer_total") or 0)), inline=True)
+    embed.add_field(name="Buyer Price", value=gp(classified_buyer_price(classified)), inline=True)
+    embed.add_field(name="Seller Receives", value=gp(classified_seller_net(classified)), inline=True)
+    embed.add_field(name="Dwarfy Commission", value=gp(classified_commission(classified)), inline=True)
     embed.add_field(name="Escrow Hold", value=classified_hold_text(classified), inline=False)
     if classified.get("variant"):
         embed.add_field(name="Variant", value=classified["variant"], inline=True)
@@ -1013,9 +1031,9 @@ def build_classified_browse_output(classifieds: list[dict[str, Any]]) -> str:
             [
                 f"{classified['classified_id']} - {classified_display_name(classified)} - {classified['rarity']}",
                 (
-                    f"Seller receives: {gp(int(classified['asking_price']))} | "
-                    f"Dwarfy fee: {gp(int(classified['broker_fee']))} | "
-                    f"Buyer total: {gp(int(classified['buyer_total']))}"
+                    f"Buyer price: {gp(classified_buyer_price(classified))} | "
+                    f"Seller receives: {gp(classified_seller_net(classified))} | "
+                    f"Dwarfy commission: {gp(classified_commission(classified))}"
                 ),
                 classified_hold_text(classified),
                 "",
@@ -1037,17 +1055,18 @@ def build_classified_trade_log(
         classified.get("seller_character_level"),
     )
     item_name = classified_display_name(classified)
+    buyer_price = classified_buyer_price(classified)
+    commission = classified_commission(classified)
+    seller_net = classified_seller_net(classified)
     return (
         "Dwarfy Classifieds Trade Log\n\n"
         f"Buyer post:\n"
-        f"{buyer} as {buyer_character} pays {gp(int(classified['buyer_total']))} total for {item_name}:\n"
-        f"* {gp(int(classified['asking_price']))} to {seller} as {seller_character}\n"
-        f"* {gp(int(classified['broker_fee']))} to Dwarfy's Shop as a classifieds broker fee\n\n"
+        f"{buyer} as {buyer_character} pays {gp(buyer_price)} to {seller} as {seller_character} for {item_name}.\n\n"
         f"Seller post:\n"
-        f"{seller} as {seller_character} receives {gp(int(classified['asking_price']))} "
-        f"from {buyer} as {buyer_character} for {item_name}.\n\n"
+        f"{seller} as {seller_character} receives {gp(seller_net)} after Dwarfy withholds "
+        f"{gp(commission)} from the sale of {item_name}.\n\n"
         f"Dwarfy fee record:\n"
-        f"Dwarfy's Shop receives {gp(int(classified['broker_fee']))} from {buyer} as {buyer_character} "
+        f"Dwarfy's Shop receives {gp(commission)} from {seller} as {seller_character} "
         f"for brokering {item_name}.\n\n"
         "Trade status: Final once both players update their logs."
     )
@@ -1193,14 +1212,15 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
 
     if selected == "classifieds":
         embed.title = "Dwarfy Help - Classifieds"
-        embed.description = "Player-to-player magic item postings. Dwarfy takes a buyer-paid fee."
+        embed.description = "Player-to-player magic item postings. Dwarfy withholds his fee from the seller."
         _help_field(
             embed,
             "Post A Classified",
             [
                 "`/dwarfy classified_post character:<name> level:<1-20> item:<item> price:<gp>`",
-                "The seller receives the listed price.",
-                f"Dwarfy adds a {CLASSIFIED_FEE_PERCENT}% broker fee paid by the buyer.",
+                "The price is what the buyer pays.",
+                f"When it sells, Dwarfy withholds a {CLASSIFIED_FEE_PERCENT}% commission from the seller's payout.",
+                "The seller receives the buyer price minus Dwarfy's commission.",
                 "The item does not enter Dwarfy inventory.",
                 f"Dwarfy holds the item for {CLASSIFIED_HOLD_DAYS} days; the seller cannot use, sell, trade, or withdraw it during that hold.",
             ],
@@ -1470,6 +1490,14 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return False
         return True
+
+    async def _require_shop_channel(self, interaction: discord.Interaction) -> bool:
+        """Require the configured Dwarfy shop channel for inventory browsing and buying."""
+        return await self._require_channel(
+            interaction,
+            self.bot.config.dwarfy_shop_channel_id,
+            "DWARFY_SHOP_CHANNEL_ID",
+        )
 
     async def _require_sheet_cache(self, interaction: discord.Interaction) -> bool:
         if self.bot.sheet_cache.loaded:
@@ -2526,7 +2554,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         max_price: int | None = None,
         search: str | None = None,
     ) -> None:
-        if not await self._require_classified_channel(interaction):
+        if not await self._require_shop_channel(interaction):
             return
         if max_price is not None and max_price < 0:
             await interaction.response.send_message(
@@ -2580,7 +2608,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     @app_commands.command(name="inspect", description="Inspect one Dwarfy listing.")
     @app_commands.describe(listing="Listing ID, such as DWF-00017.")
     async def inspect(self, interaction: discord.Interaction, listing: str) -> None:
-        if not await self._require_classified_channel(interaction):
+        if not await self._require_shop_channel(interaction):
             return
         listing_id = parse_listing_id(listing)
         if listing_id is None:
@@ -2903,7 +2931,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         level: app_commands.Range[int, 1, 20],
         gold: app_commands.Range[int, 0, 10_000_000],
     ) -> None:
-        if not await self._require_classified_channel(interaction):
+        if not await self._require_shop_channel(interaction):
             return
         listing_id = parse_listing_id(listing)
         if listing_id is None:
@@ -2946,7 +2974,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         character="Your character's name.",
         level="Your character's level.",
         item="Clean item name from Bot Items.",
-        price="Gold the seller receives if another player buys it.",
+        price="Gold the buyer pays before Dwarfy withholds seller commission.",
         variant="Optional identity for generic/template items, such as Longsword.",
         details="Optional trade notes, not full item rules text.",
     )
@@ -2972,7 +3000,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         sheet_item = context["sheet_item"]
         asking_price = int(price)
         broker_fee = classified_fee_for_price(asking_price)
-        buyer_total = asking_price + broker_fee
+        buyer_total = asking_price
         row = await self.bot.db.create_classified(
             item_name=context["listing_name"],
             item_clean_name=sheet_item.name,
@@ -3012,9 +3040,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Item: {classified_display_name(row)}",
             f"Rarity: {sheet_item.rarity}",
             f"Source: {source_with_page(sheet_item.source, sheet_item.page)}",
-            f"Seller receives: {gp(asking_price)}",
-            f"Dwarfy broker fee: {gp(broker_fee)} ({CLASSIFIED_FEE_PERCENT}%, paid by the buyer)",
-            f"Buyer total: {gp(buyer_total)}",
+            f"Buyer price: {gp(asking_price)}",
+            f"Dwarfy commission: {gp(broker_fee)} ({CLASSIFIED_FEE_PERCENT}%, withheld from seller payout)",
+            f"Seller receives if sold: {gp(asking_price - broker_fee)}",
             f"Escrow: {classified_hold_text(row)}",
             "Status: Open, held by Dwarfy",
         ]
@@ -3202,9 +3230,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Item: {classified_display_name(row)}\n"
             f"Rarity: {row['rarity']}\n"
             f"Source: {source_with_page(row.get('source'), row.get('page'))}\n"
-            f"Seller receives: {gp(int(row['asking_price']))}\n"
-            f"Dwarfy broker fee: {gp(int(row['broker_fee']))}\n"
-            f"Buyer total: {gp(int(row['buyer_total']))}\n"
+            f"Buyer price: {gp(classified_buyer_price(row))}\n"
+            f"Dwarfy commission: {gp(classified_commission(row))} (withheld from seller payout)\n"
+            f"Seller receives: {gp(classified_seller_net(row))}\n"
             "Status: Final once both players update their logs.\n\n"
             "Copyable Trade Log:\n"
             f"{trade_log}"
@@ -3220,7 +3248,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         choices: list[app_commands.Choice[str]] = []
         for row in rows:
             display_name = classified_display_name(row)
-            label = f"{row['classified_id']} - {display_name} ({gp(int(row['buyer_total']))})"
+            label = f"{row['classified_id']} - {display_name} ({gp(classified_buyer_price(row))})"
             searchable = f"{row['classified_id']} {display_name} {row['rarity']} {row.get('seller_display_name')}".casefold()
             if query and query not in searchable:
                 continue
