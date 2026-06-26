@@ -790,7 +790,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         if len(filtered) > 10:
             lines.append("Use rarity, max_price, or search filters to narrow the list.")
 
-        await send_text_response(interaction, "\n".join(lines))
+        await send_text_response(interaction, "\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="inspect", description="Inspect one Dwarfy listing.")
     @app_commands.describe(listing="Listing ID, such as DWF-00017.")
@@ -817,7 +817,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
 
-        await send_text_response(interaction, self._format_inspect(row))
+        await send_text_response(interaction, self._format_inspect(row), ephemeral=True)
 
     def _format_inspect(self, listing: dict[str, Any]) -> str:
         display_name = listing_display_name(listing)

@@ -394,6 +394,8 @@ These require one of the role names in `ADMIN_ROLE_NAMES`:
 
 Wrong-channel errors are private.
 
+`/dwarfy browse` and `/dwarfy inspect` replies are private to the person who ran the command so shop lookups do not clutter the channel. Completed sales, brokered sales, purchases, and session loot remain public audit messages.
+
 ## Buying Risk
 
 `/dwarfy buy` asks for the character's available gold because Dwarfy acts as a broker. Once the command is submitted and the listing is valid, the deal is final.
