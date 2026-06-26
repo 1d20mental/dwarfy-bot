@@ -232,6 +232,11 @@ def clean_character_name(name: str) -> str:
     return CHARACTER_AUTOCOMPLETE_LABEL_RE.sub("", clean).strip()
 
 
+def compact_character_name(name: str) -> str:
+    """Normalize whitespace only, preserving legacy saved labels for cleanup."""
+    return re.sub(r"\s+", " ", name).strip()
+
+
 def character_choice_label(character: dict[str, Any]) -> str:
     """Build a compact autocomplete label for one registered character."""
     suffix = " - active" if int(character.get("is_default") or 0) else ""
@@ -1830,7 +1835,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             await interaction.response.send_message(build_character_list_output(rows), ephemeral=True)
             return
 
-        character_name = clean_character_name(name or "")
+        raw_character_name = compact_character_name(name or "")
+        character_name = clean_character_name(raw_character_name)
         if not character_name:
             await interaction.response.send_message(
                 "Give me a character name for that character action.",
@@ -1864,6 +1870,14 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return
+
+        if action in {"set_active", "retire"} and raw_character_name != character_name:
+            exact_legacy_row = await self.bot.db.get_character(
+                user_id=str(interaction.user.id),
+                character_name=raw_character_name,
+            )
+            if exact_legacy_row is not None:
+                character_name = raw_character_name
 
         if action == "set_active":
             row = await self.bot.db.set_default_character(

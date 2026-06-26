@@ -1971,7 +1971,12 @@ class CharacterRegistryTests(unittest.TestCase):
         self.assertEqual(len(all_rows), 2)
 
     def test_character_list_output_and_choices_are_clean(self):
-        from cogs.dwarfy import build_character_list_output, character_choice_label, clean_character_name
+        from cogs.dwarfy import (
+            build_character_list_output,
+            character_choice_label,
+            clean_character_name,
+            compact_character_name,
+        )
 
         rows = [
             {
@@ -1993,6 +1998,7 @@ class CharacterRegistryTests(unittest.TestCase):
         self.assertEqual(character_choice_label(rows[0]), "Baehotin (13) - active")
         self.assertEqual(clean_character_name("Baehotin (13) - active"), "Baehotin")
         self.assertEqual(clean_character_name("Baehotin (13)"), "Baehotin")
+        self.assertEqual(compact_character_name("Baehotin (13) - active"), "Baehotin (13) - active")
         self.assertIn("Baehotin (13) - active", output)
         self.assertIn("Jimmy Noknees (2) - retired", output)
         self.assertIn("autocomplete", output)
