@@ -183,6 +183,7 @@ Rules:
 - `Rarity` is the actual item rarity shown to players. It is not used for Dwarfy money math.
 - `Roll Rarity` is the rarity bucket used by `/sessionloot`.
 - `Base Price` is the item economy value used by `/dwarfy sell`, `/dwarfy broker`, `/dwarfy stock_add`, `/dwarfy stock_random`, `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy`.
+- `Base Cost` is also accepted as an alias for `Base Price`.
 - Blank `Base Price` means Dwarfy cannot directly buy, broker, stock, or sell that item. It will not autocomplete for Dwarfy sell/broker/stock. Players can still post it in classifieds because the seller chooses the asking price there.
 - `Base Price` must be a positive whole number. Commas and `gp` are okay, such as `4,000gp`. Invalid values create a reload warning and disable Dwarfy shop pricing for that row.
 - Blank `Roll Rarity` excludes a row from session loot.

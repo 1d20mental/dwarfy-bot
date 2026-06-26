@@ -29,7 +29,7 @@ RARITY_NAMES = {
 SUPPORTED_LOOT_TYPES = {"Item", "Monster Component"}
 TRUE_TEXT = {"true", "yes", "y", "1"}
 FALSE_TEXT = {"false", "no", "n", "0"}
-BASE_PRICE_COLUMNS = ("Base Price", "Item Base Price", "Dwarfy Base Price")
+BASE_PRICE_COLUMNS = ("Base Price", "Base Cost", "Item Base Price", "Dwarfy Base Price")
 
 
 @dataclass(frozen=True)

@@ -182,6 +182,15 @@ class SheetParsingTests(unittest.TestCase):
 
         self.assertEqual(items[0].base_price, 4000)
 
+    def test_base_cost_header_is_accepted_as_base_price_alias(self):
+        rows = [
+            ["Item Name", "Rarity", "Roll Rarity", "Base Cost", "Consumable", "Allowed", "Session Eligible"],
+            ["Cloak", "Uncommon", "Uncommon", "4000", "FALSE", "TRUE", "TRUE"],
+        ]
+        _cache, items = self.load_items(rows)
+
+        self.assertEqual(items[0].base_price, 4000)
+
     def test_invalid_base_price_warns_and_disables_dwarfy_pricing(self):
         rows = [
             ["Item Name", "Rarity", "Roll Rarity", "Base Price", "Consumable", "Allowed", "Session Eligible"],
