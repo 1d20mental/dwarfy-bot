@@ -961,6 +961,67 @@ class MatchingAndDwarfyTests(unittest.TestCase):
             {"Common", "Uncommon", "Rare", "Very Rare", "Legendary"},
         )
 
+    def test_browse_output_shows_all_matching_listings_under_cap(self):
+        from cogs.dwarfy import build_browse_output
+
+        rows = []
+        for number in range(1, 38):
+            rows.append(
+                (
+                    {
+                        "listing_id": f"DWF-{number:05d}",
+                        "listing_display_name": f"Uncommon Item {number}",
+                        "item_name": f"Uncommon Item {number}",
+                        "rarity": "Uncommon",
+                        "source": "DMG 2024",
+                        "seller_user_id": "",
+                        "seller_display_name": "Dwarfy Stock",
+                        "seller_character_name": "Dwarfy Stock",
+                        "seller_character_level": 0,
+                        "stock_source": "owner_stock",
+                    },
+                    160,
+                    600,
+                )
+            )
+
+        output = build_browse_output(rows)
+
+        self.assertIn("currently has 37 matching magic items", output)
+        self.assertIn("DWF-00037", output)
+        self.assertIn("Showing all 37 matching listings.", output)
+        self.assertNotIn("Showing 10 of 37", output)
+
+    def test_browse_output_caps_extremely_large_results(self):
+        from cogs.dwarfy import BROWSE_LISTING_CAP, build_browse_output
+
+        rows = []
+        for number in range(1, BROWSE_LISTING_CAP + 6):
+            rows.append(
+                (
+                    {
+                        "listing_id": f"DWF-{number:05d}",
+                        "listing_display_name": f"Item {number}",
+                        "item_name": f"Item {number}",
+                        "rarity": "Uncommon",
+                        "source": "DMG 2024",
+                        "seller_user_id": "",
+                        "seller_display_name": "Dwarfy Stock",
+                        "seller_character_name": "Dwarfy Stock",
+                        "seller_character_level": 0,
+                        "stock_source": "owner_stock",
+                    },
+                    160,
+                    600,
+                )
+            )
+
+        output = build_browse_output(rows)
+
+        self.assertIn(f"Showing first {BROWSE_LISTING_CAP} of {BROWSE_LISTING_CAP + 5}", output)
+        self.assertIn(f"DWF-{BROWSE_LISTING_CAP:05d}", output)
+        self.assertNotIn(f"DWF-{BROWSE_LISTING_CAP + 1:05d}", output)
+
     def test_sell_item_autocomplete_returns_unique_clean_names(self):
         cache = make_cache([
             item("Ring of Protection", rarity="Rare", roll_rarity="Uncommon"),

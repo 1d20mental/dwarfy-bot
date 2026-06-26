@@ -47,6 +47,7 @@ BROWSE_RARITY_CHOICES = [
     app_commands.Choice(name="Legendary", value="Legendary"),
 ]
 BROWSE_RARITY_VALUES = {choice.value for choice in BROWSE_RARITY_CHOICES}
+BROWSE_LISTING_CAP = 100
 
 DISASTER_MESSAGES = [
     "The broker never returns. The rented desk is empty, the references were false, and the item is unrecoverable.",
@@ -151,6 +152,46 @@ def listing_origin_text(listing: dict[str, Any]) -> str:
         listing.get("seller_character_level") or listing.get("seller_level"),
     )
     return f"{seller} as {seller_character}"
+
+
+def build_browse_output(
+    listings_with_prices: list[tuple[dict[str, Any], int, int]],
+    *,
+    cap: int = BROWSE_LISTING_CAP,
+) -> str:
+    """Build the private shop browse text.
+
+    Browse is intentionally private, so showing the full matching shelf is more
+    useful than forcing users through pages. The cap is a guardrail for very
+    large shops; send_text_response will still split this into Discord-sized
+    messages.
+    """
+    shown = listings_with_prices[:cap]
+    total = len(listings_with_prices)
+    lines = [
+        f"Dwarfy's Shop currently has {total} matching magic item{'s' if total != 1 else ''} for sale:",
+        "",
+    ]
+    for listing, low, high in shown:
+        display_name = listing_display_name(listing)
+        origin = listing_origin_text(listing)
+        lines.extend(
+            [
+                f"{listing['listing_id']} \u2014 {display_name} \u2014 {listing['rarity']}",
+                (
+                    f"Source: {listing['source'] or 'Unknown'} | Price on buy: "
+                    f"{price_range_text(low, high)} | Origin: {origin}"
+                ),
+                "",
+            ]
+        )
+
+    if total > cap:
+        lines.append(f"Showing first {cap} of {total} matching listings.")
+        lines.append("Use rarity, max_price, or search filters to narrow the list.")
+    else:
+        lines.append(f"Showing all {total} matching listings.")
+    return "\n".join(lines)
 
 
 def new_stock_batch_id() -> str:
@@ -1400,30 +1441,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
 
-        shown = filtered[:10]
-        lines = [
-            f"Dwarfy's Shop currently has {len(filtered)} magic item{'s' if len(filtered) != 1 else ''} for sale:",
-            "",
-        ]
-        for listing, low, high in shown:
-            display_name = listing_display_name(listing)
-            origin = listing_origin_text(listing)
-            lines.extend(
-                [
-                    f"{listing['listing_id']} \u2014 {display_name} \u2014 {listing['rarity']}",
-                    (
-                        f"Source: {listing['source'] or 'Unknown'} | Price on buy: "
-                        f"{price_range_text(low, high)} | Origin: {origin}"
-                    ),
-                    "",
-                ]
-            )
-
-        lines.append(f"Showing {len(shown)} of {len(filtered)} matching listings.")
-        if len(filtered) > 10:
-            lines.append("Use rarity, max_price, or search filters to narrow the list.")
-
-        await send_text_response(interaction, "\n".join(lines), ephemeral=True)
+        await send_text_response(interaction, build_browse_output(filtered), ephemeral=True)
 
     @app_commands.command(name="inspect", description="Inspect one Dwarfy listing.")
     @app_commands.describe(listing="Listing ID, such as DWF-00017.")
