@@ -1187,6 +1187,62 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertTrue(is_generic_template_item(item("+1 Weapon", variant_type="Generic Weapon")))
         self.assertFalse(is_generic_template_item(item("Ring of Protection", variant_type="Specific Item")))
 
+    def test_random_stock_resolves_ammunition_any_to_stack_size(self):
+        from cogs.dwarfy import resolve_random_stock_identity
+
+        row = item(
+            "Unbreakable Ammunition (Unbreakable Arrow) (any)",
+            consumable=True,
+            variant_type="Generic Ammunition",
+            variant_options="Unbreakable Arrow, Unbreakable Bolt, Unbreakable Bullet",
+            item_type="Ammunition",
+        )
+
+        with patch("cogs.dwarfy.random.choice", return_value="Unbreakable Arrow"):
+            listing_name, variant, note = resolve_random_stock_identity(row)
+
+        self.assertEqual(listing_name, "Unbreakable Ammunition (20 arrows)")
+        self.assertEqual(variant, "20 arrows")
+        self.assertIn("Random variant: 20 arrows.", note)
+        self.assertNotIn("(any)", listing_name)
+
+    def test_random_stock_resolves_bolts_and_bullets_to_stack_sizes(self):
+        from cogs.dwarfy import resolve_random_stock_identity
+
+        row = item(
+            "Unbreakable Ammunition (any)",
+            consumable=True,
+            variant_type="Generic Ammunition",
+            variant_options="Unbreakable Arrow, Unbreakable Bolt, Unbreakable Bullet",
+            item_type="Ammunition",
+        )
+
+        with patch("cogs.dwarfy.random.choice", return_value="Unbreakable Bolt"):
+            bolt_name, bolt_variant, _note = resolve_random_stock_identity(row)
+        with patch("cogs.dwarfy.random.choice", return_value="Unbreakable Bullet"):
+            bullet_name, bullet_variant, _note = resolve_random_stock_identity(row)
+
+        self.assertEqual(bolt_name, "Unbreakable Ammunition (20 bolts)")
+        self.assertEqual(bolt_variant, "20 bolts")
+        self.assertEqual(bullet_name, "Unbreakable Ammunition (10 bullets)")
+        self.assertEqual(bullet_variant, "10 bullets")
+
+    def test_random_stock_uses_fallback_variants_when_options_are_absent(self):
+        from cogs.dwarfy import resolve_random_stock_identity
+
+        weapon = item("+1 Weapon", variant_type="Generic Weapon")
+        ammunition = item("Ammunition of Slaying", consumable=True, variant_type="Generic Ammunition")
+
+        with patch("cogs.dwarfy.random.choice", return_value="Rapier"):
+            weapon_name, weapon_variant, _note = resolve_random_stock_identity(weapon)
+        with patch("cogs.dwarfy.random.choice", return_value="10 bullets"):
+            ammo_name, ammo_variant, _note = resolve_random_stock_identity(ammunition)
+
+        self.assertEqual(weapon_name, "+1 Weapon (Rapier)")
+        self.assertEqual(weapon_variant, "Rapier")
+        self.assertEqual(ammo_name, "Ammunition of Slaying (10 bullets)")
+        self.assertEqual(ammo_variant, "10 bullets")
+
     def test_item_detail_summary_uses_enriched_display_detail(self):
         from services.sheets import item_detail_summary
 

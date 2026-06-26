@@ -77,6 +77,30 @@ STOCK_CONSUMABLE_RARITY_TABLE = [
     (76, 95, "Rare"),
     (96, 100, "Very Rare"),
 ]
+RANDOM_AMMUNITION_VARIANTS = ["20 arrows", "20 bolts", "10 bullets"]
+RANDOM_WEAPON_VARIANTS = [
+    "Longsword",
+    "Rapier",
+    "Shortsword",
+    "Scimitar",
+    "Battleaxe",
+    "Warhammer",
+    "Longbow",
+    "Shortbow",
+    "Light Crossbow",
+    "Heavy Crossbow",
+]
+RANDOM_ARMOR_VARIANTS = [
+    "Leather Armor",
+    "Studded Leather Armor",
+    "Chain Shirt",
+    "Scale Mail",
+    "Breastplate",
+    "Half Plate",
+    "Chain Mail",
+    "Splint Armor",
+    "Plate Armor",
+]
 
 
 def _display_name(user: discord.abc.User) -> str:
@@ -442,6 +466,106 @@ def stock_item_pool(
     if tag_norm:
         return stock_item_pool(cache=cache, rarity=rarity, consumable=consumable, apl=apl)
     return None, []
+
+
+def _item_search_text(sheet_item: Any) -> str:
+    """Collect item text used for simple template category detection."""
+    return " ".join(
+        str(part or "")
+        for part in (
+            sheet_item.name,
+            sheet_item.category,
+            sheet_item.tags_text,
+            sheet_item.variant_type,
+            sheet_item.variant_instructions,
+            sheet_item.item_type,
+        )
+    ).casefold()
+
+
+def item_is_ammunition_template(sheet_item: Any) -> bool:
+    """Return True when a generic stock item should resolve to ammunition."""
+    text = _item_search_text(sheet_item)
+    return any(word in text for word in ("ammunition", "arrow", "bolt", "bullet"))
+
+
+def item_is_weapon_template(sheet_item: Any) -> bool:
+    """Return True when a generic stock item should resolve to a weapon."""
+    text = _item_search_text(sheet_item)
+    return "weapon" in text or "blade" in text or "bow" in text
+
+
+def item_is_armor_template(sheet_item: Any) -> bool:
+    """Return True when a generic stock item should resolve to armor."""
+    text = _item_search_text(sheet_item)
+    return "armor" in text or "armour" in text
+
+
+def item_is_shield_template(sheet_item: Any) -> bool:
+    """Return True when a generic stock item should resolve to a shield."""
+    return "shield" in _item_search_text(sheet_item)
+
+
+def clean_random_stock_base_name(sheet_item: Any) -> str:
+    """Remove unresolved template markers from a random-stock display name."""
+    name = re.sub(r"\s*\((?:any|any [^)]+)\)\s*$", "", sheet_item.name, flags=re.IGNORECASE).strip()
+    if item_is_ammunition_template(sheet_item):
+        name = re.sub(
+            r"\s*\([^)]*(?:arrow|bolt|bullet|ammunition)[^)]*\)\s*$",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip()
+    return name or sheet_item.name
+
+
+def ammunition_stack_variant(option: str) -> str | None:
+    """Normalize an ammunition option into the server's stock stack sizes."""
+    lowered = option.casefold()
+    if "arrow" in lowered:
+        return "20 arrows"
+    if "bolt" in lowered:
+        return "20 bolts"
+    if "bullet" in lowered:
+        return "10 bullets"
+    return None
+
+
+def random_variant_from_sheet_item(sheet_item: Any) -> str | None:
+    """Choose a concrete variant for a generic/template item."""
+    options = list(sheet_item.variant_option_list)
+    if options:
+        chosen = random.choice(options)
+        if item_is_ammunition_template(sheet_item):
+            return ammunition_stack_variant(chosen) or chosen
+        return chosen
+
+    if item_is_ammunition_template(sheet_item):
+        return random.choice(RANDOM_AMMUNITION_VARIANTS)
+    if item_is_shield_template(sheet_item):
+        return "Shield"
+    if item_is_armor_template(sheet_item):
+        return random.choice(RANDOM_ARMOR_VARIANTS)
+    if item_is_weapon_template(sheet_item):
+        return random.choice(RANDOM_WEAPON_VARIANTS)
+    return None
+
+
+def resolve_random_stock_identity(sheet_item: Any) -> tuple[str, str | None, str | None]:
+    """Return listing name, variant, and note text for a random stock item."""
+    if not is_generic_template_item(sheet_item):
+        return sheet_item.name, None, None
+
+    variant = random_variant_from_sheet_item(sheet_item)
+    if not variant:
+        return (
+            sheet_item.name,
+            None,
+            "Random stock selected a template item; no automatic variant was available.",
+        )
+
+    base_name = clean_random_stock_base_name(sheet_item)
+    return resolved_listing_name(base_name, variant), variant, f"Random variant: {variant}."
 
 
 def build_buy_receipt(
@@ -1244,12 +1368,16 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             if not consumable:
                 selected_permanent_names.add(sheet_item.name.casefold())
             cost_basis = direct_sell_price(sheet_item.rarity).seller_payout
+            listing_name, variant, variant_note = resolve_random_stock_identity(sheet_item)
+            stock_note = f"Random owner stock batch {batch_id}."
+            if variant_note:
+                stock_note = f"{stock_note} {variant_note}"
             row = await self._create_owner_stock_listing(
                 interaction,
                 sheet_item=sheet_item,
-                listing_name=sheet_item.name,
-                variant=None,
-                notes=f"Random owner stock batch {batch_id}.",
+                listing_name=listing_name,
+                variant=variant,
+                notes=stock_note,
                 cost_basis=cost_basis,
                 batch_id=batch_id,
             )
@@ -1259,7 +1387,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             audit_lines.append(
                 (
                     f"{slot_type} {index}: d100 {d100} -> {rolled_rarity}{fallback_text} -> "
-                    f"{row['listing_id']} {sheet_item.name} "
+                    f"{row['listing_id']} {listing_name} "
                     f"(ticket {selection.ticket}/{selection.total_weight})"
                 )
             )
