@@ -804,7 +804,7 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         self.assertEqual(possible_final_price_range("Common", 0), (16, 70))
         self.assertEqual(possible_final_price_range("Uncommon", 320), (320, 600))
 
-    def test_shop_expense_and_dtp_are_not_discounted_in_receipt(self):
+    def test_buy_receipt_has_no_dtp_or_shop_expense(self):
         from cogs.dwarfy import build_buy_receipt
 
         listing = {
@@ -828,8 +828,9 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
             gold_available=1000,
         )
 
-        self.assertIn("Downtime cost: 5 DTP", receipt)
-        self.assertIn("Shop expense: 100gp", receipt)
+        self.assertNotIn("Downtime cost", receipt)
+        self.assertNotIn("Shop expense", receipt)
+        self.assertNotIn("Shop expense: 100gp", receipt)
         self.assertIn("Discounted price: 480gp", receipt)
 
     def test_buy_receipt_shows_haggling_roll_and_result(self):

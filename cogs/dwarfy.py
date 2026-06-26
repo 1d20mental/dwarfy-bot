@@ -146,9 +146,6 @@ def build_buy_receipt(
         f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
         f"Original seller: {seller} as {seller_character}",
         "",
-        "Downtime cost: 5 DTP",
-        "Shop expense: 100gp",
-        "",
         f"Xanathar price roll: {buy_roll.roll_detail}",
         f"Base asking price: {gp(buy_roll.rolled_price)}",
         f"Dwarfy haggling roll: {buy_roll.haggling_roll}",
@@ -1125,7 +1122,6 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         output = (
             f"{buyer} buys {item_name} from Dwarfy's Shop.\n\n"
             f"{buy_haggling_result_line(buy_roll, cost_basis)}\n\n"
-            f"{buyer} as {buyer_character} spends 5 DTP and 100gp shopping at Dwarfy's Shop.\n"
             f"{payment_lines}\n\n"
             f"{receipt}{debt_block}\n\n"
             "Adventure log reminder:\n"
