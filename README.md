@@ -405,7 +405,7 @@ Owner-stocked listings are marked separately in SQLite with `stock_source=owner_
 
 Wrong-channel errors are private.
 
-`/dwarfy browse` and `/dwarfy inspect` replies are private to the person who ran the command so shop lookups do not clutter the channel. Browse shows all matching listings up to a safety cap and splits long results across private follow-up messages. Completed sales, brokered sales, purchases, and session loot remain public audit messages.
+`/dwarfy browse` and `/dwarfy inspect` replies are private to the person who ran the command so shop lookups do not clutter the channel. Browse uses a paginated item card with Previous and Next buttons. The Show All button sends the matching list as copyable plain text, up to a safety cap, split across private follow-up messages when needed. Completed sales, brokered sales, purchases, and session loot remain public audit messages.
 
 ## Buying From Dwarfy
 

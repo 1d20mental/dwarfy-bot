@@ -48,6 +48,14 @@ BROWSE_RARITY_CHOICES = [
 ]
 BROWSE_RARITY_VALUES = {choice.value for choice in BROWSE_RARITY_CHOICES}
 BROWSE_LISTING_CAP = 100
+BROWSE_PAGE_SIZE = 10
+RARITY_COLORS = {
+    "Common": 0x8A8F98,
+    "Uncommon": 0x2ECC71,
+    "Rare": 0x3498DB,
+    "Very Rare": 0x9B59B6,
+    "Legendary": 0xF1C40F,
+}
 
 DISASTER_MESSAGES = [
     "The broker never returns. The rented desk is empty, the references were false, and the item is unrecoverable.",
@@ -154,6 +162,13 @@ def listing_origin_text(listing: dict[str, Any]) -> str:
     return f"{seller} as {seller_character}"
 
 
+def truncate_text(value: str, limit: int) -> str:
+    """Return a Discord-safe shortened label."""
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip() + "..."
+
+
 def build_browse_output(
     listings_with_prices: list[tuple[dict[str, Any], int, int]],
     *,
@@ -192,6 +207,179 @@ def build_browse_output(
     else:
         lines.append(f"Showing all {total} matching listings.")
     return "\n".join(lines)
+
+
+def browse_page_count(
+    listings_with_prices: list[tuple[dict[str, Any], int, int]],
+    *,
+    page_size: int = BROWSE_PAGE_SIZE,
+    cap: int = BROWSE_LISTING_CAP,
+) -> int:
+    """Return the number of embed pages needed for a browse result."""
+    shown_count = min(len(listings_with_prices), cap)
+    return max(1, (shown_count + page_size - 1) // page_size)
+
+
+def browse_embed_color(page_entries: list[tuple[dict[str, Any], int, int]]) -> discord.Color:
+    """Pick a stable embed accent color from the rarity mix on a page."""
+    rarities = {listing.get("rarity") for listing, _low, _high in page_entries}
+    if len(rarities) == 1:
+        rarity = next(iter(rarities))
+        return discord.Color(RARITY_COLORS.get(rarity, 0xC9A227))
+    return discord.Color(0xC9A227)
+
+
+def build_browse_embed(
+    listings_with_prices: list[tuple[dict[str, Any], int, int]],
+    *,
+    page_index: int = 0,
+    page_size: int = BROWSE_PAGE_SIZE,
+    cap: int = BROWSE_LISTING_CAP,
+) -> discord.Embed:
+    """Build one polished private browse page."""
+    shown = listings_with_prices[:cap]
+    total = len(listings_with_prices)
+    page_total = browse_page_count(listings_with_prices, page_size=page_size, cap=cap)
+    safe_page = min(max(page_index, 0), page_total - 1)
+    start = safe_page * page_size
+    end = start + page_size
+    page_entries = shown[start:end]
+
+    if total > cap:
+        description = (
+            f"{total} matching listings. Showing first {cap}; use filters to narrow further."
+        )
+    else:
+        description = f"{total} matching listing{'s' if total != 1 else ''}."
+
+    embed = discord.Embed(
+        title="Dwarfy's Shop",
+        description=description,
+        color=browse_embed_color(page_entries),
+    )
+    for listing, low, high in page_entries:
+        display_name = listing_display_name(listing)
+        origin = listing_origin_text(listing)
+        field_name = truncate_text(f"{listing['listing_id']} - {display_name}", 256)
+        field_value = (
+            f"{listing['rarity']} | {listing.get('source') or 'Unknown'} | "
+            f"Price on buy: {price_range_text(low, high)}\n"
+            f"Origin: {origin}"
+        )
+        embed.add_field(
+            name=field_name,
+            value=truncate_text(field_value, 1024),
+            inline=False,
+        )
+
+    embed.set_footer(text=f"Page {safe_page + 1} of {page_total}")
+    return embed
+
+
+class BrowseView(discord.ui.View):
+    """Private button controls for browsing Dwarfy inventory."""
+
+    def __init__(
+        self,
+        listings_with_prices: list[tuple[dict[str, Any], int, int]],
+        *,
+        owner_id: int,
+        page_size: int = BROWSE_PAGE_SIZE,
+        cap: int = BROWSE_LISTING_CAP,
+    ) -> None:
+        super().__init__(timeout=600)
+        self.listings_with_prices = listings_with_prices
+        self.owner_id = owner_id
+        self.page_size = page_size
+        self.cap = cap
+        self.page_index = 0
+        self.sync_buttons()
+
+    @property
+    def page_total(self) -> int:
+        return browse_page_count(
+            self.listings_with_prices,
+            page_size=self.page_size,
+            cap=self.cap,
+        )
+
+    def current_embed(self) -> discord.Embed:
+        return build_browse_embed(
+            self.listings_with_prices,
+            page_index=self.page_index,
+            page_size=self.page_size,
+            cap=self.cap,
+        )
+
+    def button_by_id(self, custom_id: str) -> discord.ui.Button | None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id == custom_id:
+                return child
+        return None
+
+    def sync_buttons(self) -> None:
+        previous_button = self.button_by_id("dwarfy_browse_previous")
+        next_button = self.button_by_id("dwarfy_browse_next")
+        show_all_button = self.button_by_id("dwarfy_browse_show_all")
+        if previous_button is not None:
+            previous_button.disabled = self.page_index <= 0
+        if next_button is not None:
+            next_button.disabled = self.page_index >= self.page_total - 1
+        if show_all_button is not None:
+            show_all_button.disabled = len(self.listings_with_prices) <= self.page_size
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "This browse panel belongs to the person who opened it.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(
+        label="Previous",
+        style=discord.ButtonStyle.secondary,
+        custom_id="dwarfy_browse_previous",
+    )
+    async def previous_page(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        self.page_index = max(0, self.page_index - 1)
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    @discord.ui.button(
+        label="Next",
+        style=discord.ButtonStyle.primary,
+        custom_id="dwarfy_browse_next",
+    )
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        self.page_index = min(self.page_total - 1, self.page_index + 1)
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    @discord.ui.button(
+        label="Show All",
+        style=discord.ButtonStyle.secondary,
+        custom_id="dwarfy_browse_show_all",
+    )
+    async def show_all(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await send_text_response(
+            interaction,
+            build_browse_output(self.listings_with_prices, cap=self.cap),
+            ephemeral=True,
+        )
 
 
 def new_stock_batch_id() -> str:
@@ -1441,7 +1629,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
 
-        await send_text_response(interaction, build_browse_output(filtered), ephemeral=True)
+        view = BrowseView(filtered, owner_id=interaction.user.id)
+        await interaction.response.send_message(
+            embed=view.current_embed(),
+            view=view if view.page_total > 1 else None,
+            ephemeral=True,
+        )
 
     @app_commands.command(name="inspect", description="Inspect one Dwarfy listing.")
     @app_commands.describe(listing="Listing ID, such as DWF-00017.")

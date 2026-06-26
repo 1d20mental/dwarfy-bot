@@ -1022,6 +1022,74 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertIn(f"DWF-{BROWSE_LISTING_CAP:05d}", output)
         self.assertNotIn(f"DWF-{BROWSE_LISTING_CAP + 1:05d}", output)
 
+    def test_browse_embed_paginates_matching_listings(self):
+        from cogs.dwarfy import build_browse_embed, browse_page_count
+
+        rows = []
+        for number in range(1, 13):
+            rows.append(
+                (
+                    {
+                        "listing_id": f"DWF-{number:05d}",
+                        "listing_display_name": f"Item {number}",
+                        "item_name": f"Item {number}",
+                        "rarity": "Uncommon",
+                        "source": "DMG 2024",
+                        "seller_user_id": "",
+                        "seller_display_name": "Dwarfy Stock",
+                        "seller_character_name": "Dwarfy Stock",
+                        "seller_character_level": 0,
+                        "stock_source": "owner_stock",
+                    },
+                    160,
+                    600,
+                )
+            )
+
+        self.assertEqual(browse_page_count(rows), 2)
+        first_page = build_browse_embed(rows, page_index=0)
+        second_page = build_browse_embed(rows, page_index=1)
+
+        self.assertEqual(first_page.title, "Dwarfy's Shop")
+        self.assertEqual(len(first_page.fields), 10)
+        self.assertIn("DWF-00001", first_page.fields[0].name)
+        self.assertIn("Page 1 of 2", first_page.footer.text)
+        self.assertEqual(len(second_page.fields), 2)
+        self.assertIn("DWF-00011", second_page.fields[0].name)
+        self.assertIn("Page 2 of 2", second_page.footer.text)
+
+    def test_browse_embed_uses_safety_cap(self):
+        from cogs.dwarfy import BROWSE_LISTING_CAP, build_browse_embed, browse_page_count
+
+        rows = []
+        for number in range(1, BROWSE_LISTING_CAP + 6):
+            rows.append(
+                (
+                    {
+                        "listing_id": f"DWF-{number:05d}",
+                        "listing_display_name": f"Item {number}",
+                        "item_name": f"Item {number}",
+                        "rarity": "Uncommon",
+                        "source": "DMG 2024",
+                        "seller_user_id": "",
+                        "seller_display_name": "Dwarfy Stock",
+                        "seller_character_name": "Dwarfy Stock",
+                        "seller_character_level": 0,
+                        "stock_source": "owner_stock",
+                    },
+                    160,
+                    600,
+                )
+            )
+
+        self.assertEqual(browse_page_count(rows), 10)
+        last_page = build_browse_embed(rows, page_index=9)
+
+        self.assertIn("Showing first 100", last_page.description)
+        self.assertEqual(len(last_page.fields), 10)
+        self.assertIn("DWF-00100", last_page.fields[-1].name)
+        self.assertNotIn("DWF-00101", "\n".join(field.name for field in last_page.fields))
+
     def test_sell_item_autocomplete_returns_unique_clean_names(self):
         cache = make_cache([
             item("Ring of Protection", rarity="Rare", roll_rarity="Uncommon"),
