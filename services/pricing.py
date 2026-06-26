@@ -41,8 +41,37 @@ class SellRoll:
 class BuyRoll:
     roll_detail: str
     rolled_price: int
+    haggling_roll: int
+    haggling_result: str
+    discount_percent: int
+    discounted_price: int
     final_price: int
     realized_profit: int
+    insult_line: str | None = None
+
+    @property
+    def cost_basis_floor_applied(self) -> bool:
+        """Return True when Dwarfy refused to sell below what he paid."""
+        return self.final_price > self.discounted_price
+
+
+DWARFY_NAT1_INSULTS = [
+    "A miracle. The fool had money after all.",
+    "No discount, but I did include a free lesson in quitting while behind.",
+    "That haggle was so bad I almost charged you for making me hear it.",
+    "Congratulations. You paid full price with the confidence of someone who thinks soup is a financial strategy.",
+    "Real gold. Shame about the brain attached to it.",
+    "No discount. But I will remember this when I need cheering up.",
+    "You tried. That is not worth anything, but it was loud.",
+    "Full price. And I want you to know your haggle made the register sad.",
+    "Deal. Full price. May this item serve you better than your mouth just did.",
+    "Every coin is here. Somehow, despite your best efforts.",
+    "No discount, champ. But I did enjoy watching you lose a fight with arithmetic.",
+    "There goes another hero, bravely overpaying in public.",
+    "Full price. I would explain why, but then I would have to charge tutoring rates.",
+    "I accept your money and reject whatever that negotiation was.",
+    "No discount. The item is magical. Your bargaining was not.",
+]
 
 
 def is_supported_rarity(rarity: str) -> bool:
@@ -132,7 +161,7 @@ def possible_final_price_range(rarity: str, cost_basis: int) -> tuple[int, int]:
 
 
 def roll_buy_price(rarity: str, cost_basis: int) -> BuyRoll:
-    """Roll the shop-to-player asking price and apply Dwarfy's floor."""
+    """Roll the shop-to-player asking price, haggling, and Dwarfy's floor."""
     if rarity == "Common":
         d6 = random.randint(1, 6)
         rolled = (d6 + 1) * 10
@@ -158,10 +187,35 @@ def roll_buy_price(rarity: str, cost_basis: int) -> BuyRoll:
     else:
         raise ValueError(f"Unsupported rarity: {rarity}")
 
-    final_price = max(rolled, cost_basis)
+    haggling_roll = random.randint(1, 20)
+    insult_line = None
+    if haggling_roll == 20:
+        discount_percent = 20
+        haggling_result = "Masterful haggling, 20% discount"
+    elif haggling_roll >= 16:
+        discount_percent = 10
+        haggling_result = "Strong haggling, 10% discount"
+    elif haggling_roll == 15:
+        discount_percent = 5
+        haggling_result = "Barely successful haggling, 5% discount"
+    elif haggling_roll == 1:
+        discount_percent = 0
+        haggling_result = "Dwarfy is offended. No discount."
+        insult_line = random.choice(DWARFY_NAT1_INSULTS)
+    else:
+        discount_percent = 0
+        haggling_result = "Dwarfy does not budge."
+
+    discounted_price = (rolled * (100 - discount_percent)) // 100
+    final_price = max(discounted_price, cost_basis)
     return BuyRoll(
         roll_detail=detail,
         rolled_price=rolled,
+        haggling_roll=haggling_roll,
+        haggling_result=haggling_result,
+        discount_percent=discount_percent,
+        discounted_price=discounted_price,
         final_price=final_price,
         realized_profit=final_price - cost_basis,
+        insult_line=insult_line,
     )

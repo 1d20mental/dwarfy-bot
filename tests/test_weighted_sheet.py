@@ -723,6 +723,213 @@ class DwarfySaleMechanicTests(unittest.TestCase):
         self.assertIn("cannot price", sell_validation_error(item("Artifact", rarity="Artifact")))
 
 
+class DwarfyBuyHagglingTests(unittest.TestCase):
+    def test_nat_20_applies_20_percent_discount(self):
+        with patch("services.pricing.random.randint", side_effect=[6, 20]):
+            result = roll_buy_price("Uncommon", 100)
+
+        self.assertEqual(result.rolled_price, 600)
+        self.assertEqual(result.haggling_roll, 20)
+        self.assertEqual(result.discount_percent, 20)
+        self.assertEqual(result.discounted_price, 480)
+        self.assertEqual(result.final_price, 480)
+
+    def test_rolls_16_to_19_apply_10_percent_discount(self):
+        for haggling_roll in (16, 19):
+            with self.subTest(haggling_roll=haggling_roll), patch(
+                "services.pricing.random.randint",
+                side_effect=[6, haggling_roll],
+            ):
+                result = roll_buy_price("Uncommon", 100)
+
+            self.assertEqual(result.discount_percent, 10)
+            self.assertEqual(result.discounted_price, 540)
+            self.assertEqual(result.final_price, 540)
+
+    def test_roll_15_applies_5_percent_discount(self):
+        with patch("services.pricing.random.randint", side_effect=[4, 15]):
+            result = roll_buy_price("Uncommon", 100)
+
+        self.assertEqual(result.discount_percent, 5)
+        self.assertEqual(result.discounted_price, 380)
+        self.assertEqual(result.final_price, 380)
+
+    def test_rolls_2_to_14_apply_no_discount(self):
+        for haggling_roll in (2, 14):
+            with self.subTest(haggling_roll=haggling_roll), patch(
+                "services.pricing.random.randint",
+                side_effect=[4, haggling_roll],
+            ):
+                result = roll_buy_price("Uncommon", 100)
+
+            self.assertEqual(result.discount_percent, 0)
+            self.assertEqual(result.discounted_price, 400)
+            self.assertEqual(result.final_price, 400)
+            self.assertEqual(result.haggling_result, "Dwarfy does not budge.")
+
+    def test_nat_1_applies_no_discount_and_includes_insult(self):
+        with patch("services.pricing.random.randint", side_effect=[4, 1]), patch(
+            "services.pricing.random.choice",
+            return_value="No discount. The item is magical. Your bargaining was not.",
+        ):
+            result = roll_buy_price("Common", 25)
+
+        self.assertEqual(result.haggling_roll, 1)
+        self.assertEqual(result.discount_percent, 0)
+        self.assertEqual(result.discounted_price, 50)
+        self.assertEqual(result.final_price, 50)
+        self.assertEqual(result.insult_line, "No discount. The item is magical. Your bargaining was not.")
+
+    def test_nat_1_does_not_increase_price_or_create_debt_by_itself(self):
+        with patch("services.pricing.random.randint", side_effect=[4, 1]), patch(
+            "services.pricing.random.choice",
+            return_value="Full price. I would explain why, but then I would have to charge tutoring rates.",
+        ):
+            result = roll_buy_price("Common", 25)
+
+        debt_owed = max(0, result.final_price - 100)
+        self.assertEqual(result.final_price, result.rolled_price)
+        self.assertEqual(debt_owed, 0)
+
+    def test_discount_never_lowers_final_price_below_cost_basis(self):
+        with patch("services.pricing.random.randint", side_effect=[2, 20]):
+            result = roll_buy_price("Uncommon", 300)
+
+        self.assertEqual(result.rolled_price, 200)
+        self.assertEqual(result.discounted_price, 160)
+        self.assertEqual(result.final_price, 300)
+        self.assertTrue(result.cost_basis_floor_applied)
+
+    def test_shop_expense_and_dtp_are_not_discounted_in_receipt(self):
+        from cogs.dwarfy import build_buy_receipt
+
+        listing = {
+            "listing_id": "DWF-00001",
+            "rarity": "Uncommon",
+            "source": "DMG 2024",
+            "page": "234",
+            "cost_basis": 100,
+        }
+        with patch("services.pricing.random.randint", side_effect=[6, 20]):
+            result = roll_buy_price("Uncommon", 100)
+
+        receipt = build_buy_receipt(
+            buyer="@Buyer",
+            buyer_character="Jimmy (1)",
+            listing=listing,
+            item_name="Bag of Holding",
+            seller="@Seller",
+            seller_character="Rebecca (1)",
+            buy_roll=result,
+            gold_available=1000,
+        )
+
+        self.assertIn("Downtime cost: 5 DTP", receipt)
+        self.assertIn("Shop expense: 100gp", receipt)
+        self.assertIn("Discounted price: 480gp", receipt)
+
+    def test_buy_receipt_shows_haggling_roll_and_result(self):
+        from cogs.dwarfy import build_buy_receipt
+
+        listing = {
+            "listing_id": "DWF-00002",
+            "rarity": "Rare",
+            "source": "DMG 2024",
+            "page": "294",
+            "cost_basis": 1000,
+        }
+        with patch("services.pricing.random.randint", side_effect=[3, 4, 18]):
+            result = roll_buy_price("Rare", 1000)
+
+        receipt = build_buy_receipt(
+            buyer="@Buyer",
+            buyer_character="Jimmy (1)",
+            listing=listing,
+            item_name="Ring of Protection",
+            seller="@Seller",
+            seller_character="Rebecca (1)",
+            buy_roll=result,
+            gold_available=7000,
+        )
+
+        self.assertIn("Xanathar price roll: 2d10 x 1,000gp = (3 + 4) x 1,000gp = 7000gp", receipt)
+        self.assertIn("Dwarfy haggling roll: 18", receipt)
+        self.assertIn("Haggling result: Strong haggling, 10% discount", receipt)
+        self.assertIn("Final item price: 6,300gp", receipt)
+
+    def test_buy_haggling_result_line_highlights_cost_basis_floor(self):
+        from cogs.dwarfy import buy_haggling_result_line
+
+        with patch("services.pricing.random.randint", side_effect=[2, 20]):
+            result = roll_buy_price("Uncommon", 300)
+
+        line = buy_haggling_result_line(result, 300)
+
+        self.assertIn("Dwarfy haggling roll: 20", line)
+        self.assertIn("Final item price: 300gp", line)
+        self.assertIn("**Dwarfy will not sell below his 300gp cost basis.**", line)
+
+    def test_database_stores_buy_haggling_audit_and_marks_sold(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_listing(
+                        item_name="Bag of Holding",
+                        rarity="Uncommon",
+                        source="DMG 2024",
+                        category="Wondrous item",
+                        tags="storage",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Rebecca",
+                        seller_character_level=1,
+                        sell_roll=0,
+                        seller_payout=240,
+                        sale_method="direct",
+                        item_status="inventory",
+                    )
+                    sold = await db.mark_listing_sold(
+                        listing_id=row["listing_id"],
+                        buyer_user_id="456",
+                        buyer_display_name="Buyer",
+                        buyer_character_name="Jimmy",
+                        buyer_character_level=1,
+                        buy_price_roll_detail="1d6 x 100gp = 6 x 100gp = 600gp",
+                        final_sale_price=540,
+                        realized_profit=300,
+                        buyer_gold_available=1000,
+                        buy_base_asking_price=600,
+                        buy_haggling_roll=18,
+                        buy_haggling_result="Strong haggling, 10% discount",
+                        buy_discount_percent=10,
+                        buy_discounted_price=540,
+                        buy_final_item_price=540,
+                        buy_dwarfy_profit=300,
+                        buy_receipt_text="Dwarfy Buy Receipt:\nDwarfy haggling roll: 18",
+                    )
+                    fetched = await db.get_listing(row["listing_id"])
+                    available = await db.list_available_listings()
+                finally:
+                    await db.close()
+                return sold, fetched, available
+
+        sold, fetched, available = asyncio.run(run_case())
+
+        self.assertTrue(sold)
+        self.assertEqual(fetched["status"], "sold")
+        self.assertEqual(fetched["item_status"], "sold")
+        self.assertEqual(fetched["buy_haggling_roll"], 18)
+        self.assertEqual(fetched["buy_discount_percent"], 10)
+        self.assertEqual(fetched["buy_final_item_price"], 540)
+        self.assertEqual(fetched["buy_dwarfy_profit"], 300)
+        self.assertIn("Dwarfy Buy Receipt", fetched["buy_receipt_text"])
+        self.assertEqual(available, [])
+
+
 class MatchingAndDwarfyTests(unittest.TestCase):
     def test_listing_id_parser_accepts_common_copy_paste_forms(self):
         from cogs.dwarfy import parse_listing_id

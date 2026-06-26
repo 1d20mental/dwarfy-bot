@@ -107,6 +107,75 @@ def broker_sale_result_line(sale: Any) -> str:
     return f"🎲 Broker roll: {sale.roll} - {sale.result_text} - payout {gp(sale.seller_payout)}."
 
 
+def buy_haggling_result_line(buy_roll: Any, cost_basis: int) -> str:
+    """Put the buy haggling result near the top of the public receipt."""
+    line = (
+        f"🎲 Dwarfy haggling roll: {buy_roll.haggling_roll} - "
+        f"{buy_roll.haggling_result} Final item price: {gp(buy_roll.final_price)}."
+    )
+    if buy_roll.cost_basis_floor_applied:
+        line += f" **Dwarfy will not sell below his {gp(cost_basis)} cost basis.**"
+    return line
+
+
+def discount_text(discount_percent: int) -> str:
+    """Return a human-readable discount line for buy receipts."""
+    if discount_percent <= 0:
+        return "none"
+    return f"{discount_percent}%"
+
+
+def build_buy_receipt(
+    *,
+    buyer: str,
+    buyer_character: str,
+    listing: dict[str, Any],
+    item_name: str,
+    seller: str,
+    seller_character: str,
+    buy_roll: Any,
+    gold_available: int,
+) -> str:
+    """Build the public buy receipt and the stored buy audit text."""
+    lines = [
+        "Dwarfy Buy Receipt:",
+        f"Buyer: {buyer} as {buyer_character}",
+        f"Listing: {listing['listing_id']}",
+        f"Item: {item_name}",
+        f"Rarity: {listing['rarity']}",
+        f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
+        f"Original seller: {seller} as {seller_character}",
+        "",
+        "Downtime cost: 5 DTP",
+        "Shop expense: 100gp",
+        "",
+        f"Xanathar price roll: {buy_roll.roll_detail}",
+        f"Base asking price: {gp(buy_roll.rolled_price)}",
+        f"Dwarfy haggling roll: {buy_roll.haggling_roll}",
+        f"Haggling result: {buy_roll.haggling_result}",
+        f"Discount: {discount_text(buy_roll.discount_percent)}",
+    ]
+    if buy_roll.discount_percent:
+        lines.append(f"Discounted price: {gp(buy_roll.discounted_price)}")
+    if buy_roll.insult_line:
+        lines.append(f'Dwarfy says: "{buy_roll.insult_line}"')
+    if buy_roll.cost_basis_floor_applied:
+        lines.append(f"Floor: Dwarfy will not sell below his {gp(int(listing['cost_basis']))} cost basis.")
+
+    lines.extend(
+        [
+            "",
+            f"Dwarfy cost basis: {gp(int(listing['cost_basis']))}",
+            f"Final item price: {gp(buy_roll.final_price)}",
+            f"Declared gold available: {gp(gold_available)}",
+            f"Dwarfy profit: {gp(buy_roll.realized_profit)}",
+            "",
+            "Sale status: Final, no takebacks",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def sell_validation_error(sheet_item) -> str | None:
     """Return an ephemeral validation error for /dwarfy sell, or None."""
     if not sheet_item.allowed:
@@ -889,6 +958,16 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                     f"Sold at: {listing['sold_at']}",
                 ]
             )
+            if listing.get("buy_haggling_roll") is not None:
+                lines.extend(
+                    [
+                        f"Buy base asking price: {gp(int(listing.get('buy_base_asking_price') or 0))}",
+                        f"Buy haggling roll: {listing['buy_haggling_roll']}",
+                        f"Buy haggling result: {listing.get('buy_haggling_result') or 'none'}",
+                        f"Buy discount: {discount_text(int(listing.get('buy_discount_percent') or 0))}",
+                        f"Buy discounted price: {gp(int(listing.get('buy_discounted_price') or 0))}",
+                    ]
+                )
             if listing.get("debt_total"):
                 lines.extend(
                     [
@@ -910,6 +989,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         stored_receipt = listing.get("adventure_log_receipt") or listing.get("receipt_text")
         if stored_receipt:
             lines.extend(["", "Stored Adventure Log Receipt:", stored_receipt])
+        if listing.get("buy_receipt_text"):
+            lines.extend(["", "Stored Buy Receipt:", listing["buy_receipt_text"]])
 
         return "\n".join(lines)
 
@@ -965,10 +1046,28 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         buy_roll = roll_buy_price(row["rarity"], int(row["cost_basis"]))
         item_name = listing_display_name(row)
         gold_available = int(gold)
+        cost_basis = int(row["cost_basis"])
+        buyer = interaction.user.mention
+        buyer_character = character_label(character, int(level))
+        seller = mention_user(row["seller_user_id"], row["seller_display_name"])
+        seller_character = character_label(
+            row["seller_character_name"],
+            row["seller_character_level"],
+        )
         debt_owed = max(0, buy_roll.final_price - gold_available)
         debt_fine = 5_000 if debt_owed else 0
         debt_total = debt_owed + debt_fine
         debt_status = "unpaid" if debt_total else None
+        receipt = build_buy_receipt(
+            buyer=buyer,
+            buyer_character=buyer_character,
+            listing=row,
+            item_name=item_name,
+            seller=seller,
+            seller_character=seller_character,
+            buy_roll=buy_roll,
+            gold_available=gold_available,
+        )
         sold = await self.bot.db.mark_listing_sold(
             listing_id=row["listing_id"],
             buyer_user_id=str(interaction.user.id),
@@ -983,6 +1082,14 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             debt_fine=debt_fine,
             debt_total=debt_total,
             debt_status=debt_status,
+            buy_base_asking_price=buy_roll.rolled_price,
+            buy_haggling_roll=buy_roll.haggling_roll,
+            buy_haggling_result=buy_roll.haggling_result,
+            buy_discount_percent=buy_roll.discount_percent,
+            buy_discounted_price=buy_roll.discounted_price,
+            buy_final_item_price=buy_roll.final_price,
+            buy_dwarfy_profit=buy_roll.realized_profit,
+            buy_receipt_text=receipt,
         )
         if not sold:
             await interaction.response.send_message(
@@ -991,31 +1098,23 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
 
-        buyer = interaction.user.mention
-        buyer_character = character_label(character, int(level))
-        seller = mention_user(row["seller_user_id"], row["seller_display_name"])
-        seller_character = character_label(
-            row["seller_character_name"],
-            row["seller_character_level"],
-        )
-
         debt_block = ""
         if debt_total:
             debt_block = (
-                "\nBroker debt consequence:\n\n"
+                "\nDwarfy debt consequence:\n\n"
                 f"* Declared gold available: {gp(gold_available)}\n"
                 f"* Price shortfall: {gp(debt_owed)}\n"
                 f"* Contract default fine: {gp(debt_fine)}\n"
                 f"* Total debt to clear: {gp(debt_total)}\n"
                 "* Character status: Jailed and unplayable until the debt is paid.\n"
                 f"* Item status: {item_name} is still yours, but it cannot be sold or traded until the debt is paid.\n\n"
-                "Dwarfy had already brokered the deal. The seller was paid, the contract was witnessed, "
+                "Dwarfy already owned the item, prepared the sale, signed the shop ledger, "
                 "and the collectors are painfully punctual."
             )
         if debt_total:
             payment_lines = (
                 f"{buyer} as {buyer_character} cannot cover the {gp(buy_roll.final_price)} final price for {item_name}.\n"
-                f"Dwarfy's Shop records a brokered sale for {item_name}; the item transfers, and the debt is now enforceable."
+                f"Dwarfy's Shop records the sale for {item_name}; the item transfers, and the debt is now enforceable."
             )
         else:
             payment_lines = (
@@ -1024,20 +1123,11 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
 
         output = (
-            f"{buyer} as {buyer_character} spends 5 DTP and 100gp seeking to buy a magic item from Dwarfy's Shop.\n"
+            f"{buyer} buys {item_name} from Dwarfy's Shop.\n\n"
+            f"{buy_haggling_result_line(buy_roll, cost_basis)}\n\n"
+            f"{buyer} as {buyer_character} spends 5 DTP and 100gp shopping at Dwarfy's Shop.\n"
             f"{payment_lines}\n\n"
-            "Buying Magic Item receipt:\n\n"
-            f"* Listing: {row['listing_id']}\n"
-            f"* Item: {item_name}\n"
-            f"* Rarity: {row['rarity']}\n"
-            f"* Source: {row['source'] or 'Unknown'}\n"
-            f"* Original seller: {seller} as {seller_character}\n"
-            f"* Dwarfy's cost basis: {gp(int(row['cost_basis']))}\n"
-            f"* Asking price roll: {buy_roll.roll_detail}\n"
-            f"* Final item price: {gp(buy_roll.final_price)}\n"
-            f"* Declared gold available: {gp(gold_available)}\n"
-            f"* Realized Dwarfy profit: {gp(buy_roll.realized_profit)}\n"
-            f"* Purchase status: Final, no takebacks{debt_block}\n\n"
+            f"{receipt}{debt_block}\n\n"
             "Adventure log reminder:\n"
             "Record this downtime activity manually on the character's adventure log."
         )

@@ -396,11 +396,21 @@ Wrong-channel errors are private.
 
 `/dwarfy browse` and `/dwarfy inspect` replies are private to the person who ran the command so shop lookups do not clutter the channel. Completed sales, brokered sales, purchases, and session loot remain public audit messages.
 
-## Buying Risk
+## Buying From Dwarfy
 
-`/dwarfy buy` asks for the character's available gold because Dwarfy acts as a broker. Once the command is submitted and the listing is valid, the deal is final.
+`/dwarfy buy` asks for the character's available gold. Dwarfy already owns the listed item; there is no outside seller search.
 
-If the rolled final price is higher than the declared gold, the bot still marks the item as sold to that character. The character owes the shortfall plus a `5,000gp` contract-default fine, is jailed/unplayable until that debt is paid, and cannot sell or trade the item until the debt is cleared.
+The bot first rolls the normal Xanathar-style asking price for the item's rarity. Then it rolls a flat `1d20` Dwarfy haggling roll:
+
+- `20`: 20% discount.
+- `16-19`: 10% discount.
+- `15`: 5% discount.
+- `2-14`: no discount.
+- `1`: no discount and Dwarfy insults the buyer, but there is no mechanical penalty.
+
+The haggling roll can only reduce the item price. The final item price can never be below Dwarfy's cost basis. The `5 DTP` downtime cost and `100gp` shop expense are not discounted.
+
+Once `/dwarfy buy` is submitted and the listing is valid, the deal is final. If the final item price is higher than the declared gold, the bot still marks the item as sold to that character. The character owes the shortfall plus a `5,000gp` contract-default fine, is jailed/unplayable until that debt is paid, and cannot sell or trade the item until the debt is cleared.
 
 ## Common Errors
 
