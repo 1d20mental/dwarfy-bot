@@ -57,23 +57,46 @@ def base_price_for_rarity(rarity: str) -> int:
     return BASE_PRICES[rarity]
 
 
-def roll_sell_price(rarity: str) -> SellRoll:
-    """Roll the player-to-shop Sell Magic Item result."""
+def direct_sell_price(rarity: str) -> SellRoll:
+    """Return the guaranteed direct-sale payout.
+
+    Direct sale is intentionally boring: no DTP, no gold fee, no d20 roll, and
+    a fixed 40% payout.
+    """
+    base_price = base_price_for_rarity(rarity)
+    payout = (base_price * 40) // 100
+    return SellRoll(
+        roll=0,
+        result_text="Guaranteed direct sale, 40% of base price",
+        payout_percent=40,
+        base_price=base_price,
+        seller_payout=payout,
+    )
+
+
+def roll_broker_price(rarity: str) -> SellRoll:
+    """Roll the downtime brokered player-to-shop sale result."""
     base_price = base_price_for_rarity(rarity)
     roll = random.randint(1, 20)
 
     if roll == 20:
-        percent = 80
-        result = "Excellent buyer, 80% of base price"
-    elif roll >= 11:
+        percent = 100
+        result = "Excellent buyer, 100% of base price"
+    elif roll >= 16:
+        percent = 60
+        result = "Strong buyer, 60% of base price"
+    elif roll >= 10:
         percent = 50
-        result = "Standard buyer, 50% of base price"
+        result = "Fair buyer, 50% of base price"
+    elif roll >= 6:
+        percent = 30
+        result = "Weak buyer, 30% of base price"
     elif roll >= 2:
-        percent = 25
-        result = "Poor buyer, 25% of base price"
+        percent = 20
+        result = "Poor buyer, 20% of base price"
     else:
         percent = 0
-        result = "Sale disaster"
+        result = "Disaster. The item is lost during brokerage."
 
     payout = (base_price * percent) // 100
     return SellRoll(
@@ -83,6 +106,11 @@ def roll_sell_price(rarity: str) -> SellRoll:
         base_price=base_price,
         seller_payout=payout,
     )
+
+
+def roll_sell_price(rarity: str) -> SellRoll:
+    """Backward-compatible name for the brokered sale roll."""
+    return roll_broker_price(rarity)
 
 
 def buy_price_formula(rarity: str) -> str:

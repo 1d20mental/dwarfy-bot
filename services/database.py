@@ -77,6 +77,14 @@ class DwarfyDatabase:
                 json_notes TEXT,
                 item_tags TEXT,
                 receipt_text TEXT,
+                sale_method TEXT,
+                sale_percent INTEGER,
+                dtp_cost INTEGER,
+                gold_cost INTEGER,
+                broker_roll INTEGER,
+                broker_result TEXT,
+                item_status TEXT,
+                adventure_log_receipt TEXT,
                 seller_user_display TEXT,
                 seller_character TEXT,
                 seller_level INTEGER,
@@ -140,6 +148,14 @@ class DwarfyDatabase:
             "json_notes": "ALTER TABLE listings ADD COLUMN json_notes TEXT",
             "item_tags": "ALTER TABLE listings ADD COLUMN item_tags TEXT",
             "receipt_text": "ALTER TABLE listings ADD COLUMN receipt_text TEXT",
+            "sale_method": "ALTER TABLE listings ADD COLUMN sale_method TEXT",
+            "sale_percent": "ALTER TABLE listings ADD COLUMN sale_percent INTEGER",
+            "dtp_cost": "ALTER TABLE listings ADD COLUMN dtp_cost INTEGER",
+            "gold_cost": "ALTER TABLE listings ADD COLUMN gold_cost INTEGER",
+            "broker_roll": "ALTER TABLE listings ADD COLUMN broker_roll INTEGER",
+            "broker_result": "ALTER TABLE listings ADD COLUMN broker_result TEXT",
+            "item_status": "ALTER TABLE listings ADD COLUMN item_status TEXT",
+            "adventure_log_receipt": "ALTER TABLE listings ADD COLUMN adventure_log_receipt TEXT",
             "seller_user_display": "ALTER TABLE listings ADD COLUMN seller_user_display TEXT",
             "seller_character": "ALTER TABLE listings ADD COLUMN seller_character TEXT",
             "seller_level": "ALTER TABLE listings ADD COLUMN seller_level INTEGER",
@@ -184,6 +200,14 @@ class DwarfyDatabase:
         json_notes: str | None = None,
         item_tags: str | None = None,
         receipt_text: str | None = None,
+        sale_method: str | None = None,
+        sale_percent: int | None = None,
+        dtp_cost: int | None = None,
+        gold_cost: int | None = None,
+        broker_roll: int | None = None,
+        broker_result: str | None = None,
+        item_status: str | None = "inventory",
+        adventure_log_receipt: str | None = None,
         seller_user_display: str | None = None,
     ) -> dict[str, Any]:
         """Create an available listing after a successful player sale."""
@@ -198,10 +222,12 @@ class DwarfyDatabase:
                 variant_details, variant_type, variant_instructions,
                 item_type, attunement, page, display_detail, short_description,
                 rules_text, json_notes, item_tags, receipt_text,
+                sale_method, sale_percent, dtp_cost, gold_cost,
+                broker_roll, broker_result, item_status, adventure_log_receipt,
                 seller_user_display, seller_character, seller_level,
                 status, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
             """,
             (
                 None,
@@ -234,6 +260,14 @@ class DwarfyDatabase:
                 json_notes,
                 item_tags,
                 receipt_text,
+                sale_method,
+                sale_percent,
+                dtp_cost,
+                gold_cost,
+                broker_roll,
+                broker_result,
+                item_status,
+                adventure_log_receipt or receipt_text,
                 seller_user_display,
                 seller_character_name,
                 seller_character_level,
@@ -306,6 +340,7 @@ class DwarfyDatabase:
             """
             SELECT * FROM listings
             WHERE status = 'available'
+              AND COALESCE(item_status, 'inventory') = 'inventory'
             ORDER BY id ASC
             """
         )
@@ -332,12 +367,15 @@ class DwarfyDatabase:
         listing = await self.get_listing(listing_id)
         if listing is None or listing["status"] != "available":
             return False
+        if (listing.get("item_status") or "inventory") != "inventory":
+            return False
 
         now = utc_now_text()
         cursor = await self.db.execute(
             """
             UPDATE listings
             SET status = 'sold',
+                item_status = 'sold',
                 buyer_user_id = ?,
                 buyer_display_name = ?,
                 buyer_character_name = ?,
@@ -401,7 +439,7 @@ class DwarfyDatabase:
         await self.db.execute(
             """
             UPDATE listings
-            SET status = 'voided', voided_at = ?, void_reason = ?
+            SET status = 'voided', item_status = 'voided', voided_at = ?, void_reason = ?
             WHERE UPPER(listing_id) = UPPER(?)
             """,
             (utc_now_text(), reason.strip(), listing_id),

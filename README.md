@@ -14,7 +14,8 @@ Google Sheets is the master item reference. SQLite is the live shop inventory an
 - Loads the `Bot Items` and `Monster Components` tabs from one Google Sheet.
 - Caches that sheet data in memory so commands are fast.
 - Creates a SQLite database automatically at `data/dwarfy.sqlite`.
-- Lets players sell permanent magic items with `/dwarfy sell`.
+- Lets players sell permanent magic items directly with `/dwarfy sell`.
+- Lets players broker permanent magic-item sales with `/dwarfy broker`.
 - Lets players browse, inspect, and buy Dwarfy shop listings.
 - Lets admins/mods run `/dwarfy stats`, `/dwarfy void`, and `/dwarfy reload`.
 - Rolls session loot with `/sessionloot`.
@@ -180,7 +181,7 @@ Rules:
 - Blank `Weight` defaults to `1`.
 - Invalid `Weight` creates a reload warning and defaults to `1`.
 - `Allowed` should be `TRUE` or `FALSE`.
-- `Allowed=FALSE` excludes the row from `/sessionloot` and blocks `/dwarfy sell`.
+- `Allowed=FALSE` excludes the row from `/sessionloot` and blocks `/dwarfy sell` and `/dwarfy broker`.
 - `Session Eligible=FALSE` excludes the row from `/sessionloot`.
 - `Consumable` should be `TRUE` or `FALSE`.
 - `Consumable=TRUE` is for consumable loot slots.
@@ -196,16 +197,16 @@ Rules:
 - Blank `Min APL` means no minimum.
 - Blank `Max APL` means no maximum.
 - Rarity values are normalized, so `very rare`, `Very rare`, and `Very Rare` all become `Very Rare`.
-- `Dwarfy Sell Eligible=FALSE` blocks `/dwarfy sell` for that row.
+- `Dwarfy Sell Eligible=FALSE` blocks `/dwarfy sell` and `/dwarfy broker` for that row.
 - `Variant Type` describes generic/template rows, such as `Generic Weapon`, `Generic Armor`, `Generic Shield`, `Generic Ammunition`, `Generic Item`, or `Specific Item`.
 - `Variant Instructions` tells the DM/player how to resolve a generic row.
-- `Variant Options` is an optional comma-separated suggestion list for the `/dwarfy sell` variant field.
+- `Variant Options` is an optional comma-separated suggestion list for the `/dwarfy sell` and `/dwarfy broker` variant field.
 - `Page` is shown with the player-facing source when available.
 - `Item Type`, `Attunement`, `Display Detail`, `Short Description`, and `Rules Text` come from JSON-enriched item data and are used for clean display and audit receipts.
 - `JSON Notes`, `Item Tags`, `JSON Source Key`, and `JSON Match Status` are optional reference/audit columns.
 - `Notes` are for human reference.
 
-Only permanent magic items can be sold to Dwarfy with `/dwarfy sell`. Consumables are valid for `/sessionloot`, but not for shop sales.
+Only permanent magic items can be sold to Dwarfy with `/dwarfy sell` or `/dwarfy broker`. Consumables are valid for `/sessionloot`, but not for shop sales.
 
 Generic/template items stay as one row. For example, `+1 Weapon` should stay as `+1 Weapon`; the bot should not generate every possible longsword, rapier, or bow in code. Use `Variant Type` and `Variant Instructions` to tell the DM/player how to resolve it.
 
@@ -217,7 +218,7 @@ Variant Type: Generic Weapon
 Variant Instructions: Choose any valid weapon when awarded.
 ```
 
-For `/dwarfy sell`, players can use the optional `variant` field for generic/template item identity:
+For `/dwarfy sell` and `/dwarfy broker`, players can use the optional `variant` field for generic/template item identity:
 
 ```text
 item: +1 Weapon
@@ -237,6 +238,39 @@ Normal specific items should not use `variant`. For example, `Ring of Protection
 ```text
 item: Ring of Protection
 ```
+
+## Selling To Dwarfy
+
+Dwarfy has two player-facing ways to turn a permanent magic item into gold.
+
+`/dwarfy sell` is a direct sale:
+
+- No DTP cost.
+- No gold cost.
+- No downtime broker roll.
+- Guaranteed payout: `40%` of the item's base price.
+- The item enters Dwarfy's magic inventory.
+
+`/dwarfy broker` is a downtime brokered sale:
+
+- Costs `5 DTP` and `25gp` manually.
+- Rolls a flat `1d20`.
+- Can pay better or worse than direct sale.
+- A natural 1 loses the item and it does not enter Dwarfy's inventory.
+- A successful brokered item enters Dwarfy's magic inventory.
+
+Direct sale is fast and safe, but pays less. Brokered sale spends downtime and gold for a chance at a better payout. Players who want better than direct sale without broker risk should try to sell to another player.
+
+Brokered sale roll table:
+
+| d20 | Result | Payout |
+| --- | --- | --- |
+| 20 | Excellent buyer | 100% of base price |
+| 16-19 | Strong buyer | 60% of base price |
+| 10-15 | Fair buyer | 50% of base price |
+| 6-9 | Weak buyer | 30% of base price |
+| 2-5 | Poor buyer | 20% of base price |
+| 1 | Disaster, item lost | 0gp |
 
 ## Weighting Example
 
@@ -326,10 +360,11 @@ If Google Sheets cannot load, the bot still starts when possible. Sheet-dependen
 After that, test the shop flow:
 
 1. In the sell channel, run `/dwarfy sell character:Name level:5 item:Bag of Holding`.
-2. For a generic/template item, run `/dwarfy sell character:Name level:5 item:+1 Weapon variant:Longsword`.
-3. In the shop channel, run `/dwarfy browse`.
-4. Run `/dwarfy inspect listing:DWF-00001`.
-5. Run `/dwarfy buy listing:DWF-00001 character:Other Name level:5 gold:2000`.
+2. In the sell channel, run `/dwarfy broker character:Name level:5 item:Bag of Holding`.
+3. For a generic/template item, run `/dwarfy sell character:Name level:5 item:+1 Weapon variant:Longsword`.
+4. In the shop channel, run `/dwarfy browse`.
+5. Run `/dwarfy inspect listing:DWF-00001`.
+6. Run `/dwarfy buy listing:DWF-00001 character:Other Name level:5 gold:2000`.
 
 ## Commands
 
@@ -337,6 +372,7 @@ After that, test the shop flow:
 
 - `/dwarfy ping`
 - `/dwarfy sell`
+- `/dwarfy broker`
 - `/dwarfy browse`
 - `/dwarfy inspect`
 - `/dwarfy buy`
@@ -352,8 +388,8 @@ These require one of the role names in `ADMIN_ROLE_NAMES`:
 
 ## Channel Rules
 
-- `/dwarfy sell` only works in `DWARFY_SELL_CHANNEL_ID`.
-- `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy` only works in `DWARFY_SHOP_CHANNEL_ID`.
+- `/dwarfy sell` and `/dwarfy broker` only work in `DWARFY_SELL_CHANNEL_ID`.
+- `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy` only work in `DWARFY_SHOP_CHANNEL_ID`.
 - `/sessionloot` only checks `SESSION_LOOT_CHANNEL_ID` if that value is filled in.
 
 Wrong-channel errors are private.

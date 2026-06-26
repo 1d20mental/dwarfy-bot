@@ -13,7 +13,13 @@ from services.loot import (
     pick_weighted_item,
     select_loot_item,
 )
-from services.pricing import base_price_for_rarity, possible_final_price_range, roll_buy_price
+from services.pricing import (
+    base_price_for_rarity,
+    direct_sell_price,
+    possible_final_price_range,
+    roll_broker_price,
+    roll_buy_price,
+)
 from services.sheets import SheetCache, SheetItem
 
 
@@ -419,6 +425,291 @@ class MonsterComponentTests(unittest.TestCase):
             output = self.format_monster(row)
 
         self.assertIn("Creature Type: Beast", output)
+
+
+class DwarfySaleMechanicTests(unittest.TestCase):
+    def test_direct_sell_pays_40_percent_and_does_not_roll(self):
+        with patch("services.pricing.random.randint") as randint:
+            result = direct_sell_price("Rare")
+
+        randint.assert_not_called()
+        self.assertEqual(result.base_price, 4000)
+        self.assertEqual(result.payout_percent, 40)
+        self.assertEqual(result.seller_payout, 1600)
+        self.assertEqual(result.roll, 0)
+
+    def test_direct_sell_receipt_has_no_dtp_or_gold_cost(self):
+        from cogs.dwarfy import build_sell_receipt
+
+        receipt = build_sell_receipt(
+            activity="Sell Magic Item directly to Dwarfy's Shop",
+            character="Baehotin",
+            level=13,
+            seller_mention="@Player",
+            seller_display_name="Player",
+            listing_name="Ring of Protection",
+            base_item_name="Ring of Protection",
+            variant=None,
+            listing_id="DWF-00001",
+            rarity="Rare",
+            item_detail="Rare Ring",
+            source="DMG 2024",
+            page="294",
+            base_price=4000,
+            dtp_cost=0,
+            gold_cost=0,
+            seller_payout=1600,
+            status="Final, no takebacks",
+        )
+
+        self.assertIn("DTP spent: 0", receipt)
+        self.assertIn("Gold spent: 0gp", receipt)
+        self.assertNotIn("Broker roll:", receipt)
+
+    def test_broker_roll_table(self):
+        cases = [
+            (20, 100, 4000, "Excellent buyer"),
+            (18, 60, 2400, "Strong buyer"),
+            (12, 50, 2000, "Fair buyer"),
+            (7, 30, 1200, "Weak buyer"),
+            (3, 20, 800, "Poor buyer"),
+            (1, 0, 0, "Disaster"),
+        ]
+
+        for roll, percent, payout, text in cases:
+            with self.subTest(roll=roll), patch("services.pricing.random.randint", return_value=roll):
+                result = roll_broker_price("Rare")
+
+            self.assertEqual(result.roll, roll)
+            self.assertEqual(result.payout_percent, percent)
+            self.assertEqual(result.seller_payout, payout)
+            self.assertIn(text, result.result_text)
+
+    def test_actual_rarity_is_used_for_direct_and_broker_pricing(self):
+        row = item(name="Rare Rolled Low", rarity="Rare", roll_rarity="Uncommon")
+
+        self.assertEqual(direct_sell_price(row.rarity).seller_payout, 1600)
+        with patch("services.pricing.random.randint", return_value=20):
+            self.assertEqual(roll_broker_price(row.rarity).seller_payout, 4000)
+
+    def test_database_records_direct_sale_inventory(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_listing(
+                        item_name="Ring of Protection",
+                        rarity="Rare",
+                        source="DMG 2024",
+                        category="Ring",
+                        tags="ring",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Baehotin",
+                        seller_character_level=13,
+                        sell_roll=0,
+                        seller_payout=1600,
+                        sale_method="direct",
+                        sale_percent=40,
+                        dtp_cost=0,
+                        gold_cost=0,
+                        item_status="inventory",
+                        receipt_text="Adventure Log Receipt",
+                    )
+                    available = await db.list_available_listings()
+                finally:
+                    await db.close()
+                return row, available
+
+        row, available = asyncio.run(run_case())
+
+        self.assertEqual(row["sale_method"], "direct")
+        self.assertEqual(row["seller_payout"], 1600)
+        self.assertEqual(row["cost_basis"], 1600)
+        self.assertEqual(row["dtp_cost"], 0)
+        self.assertEqual(row["gold_cost"], 0)
+        self.assertEqual(row["item_status"], "inventory")
+        self.assertEqual([listing["listing_id"] for listing in available], [row["listing_id"]])
+
+    def test_database_records_successful_broker_sale_inventory(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_listing(
+                        item_name="Ring of Protection",
+                        rarity="Rare",
+                        source="DMG 2024",
+                        category="Ring",
+                        tags="ring",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Baehotin",
+                        seller_character_level=13,
+                        sell_roll=18,
+                        seller_payout=2400,
+                        sale_method="broker",
+                        sale_percent=60,
+                        dtp_cost=5,
+                        gold_cost=25,
+                        broker_roll=18,
+                        broker_result="Strong buyer, 60% of base price",
+                        item_status="inventory",
+                    )
+                    available = await db.list_available_listings()
+                finally:
+                    await db.close()
+                return row, available
+
+        row, available = asyncio.run(run_case())
+
+        self.assertEqual(row["sale_method"], "broker")
+        self.assertEqual(row["broker_roll"], 18)
+        self.assertEqual(row["broker_result"], "Strong buyer, 60% of base price")
+        self.assertEqual(row["dtp_cost"], 5)
+        self.assertEqual(row["gold_cost"], 25)
+        self.assertEqual([listing["listing_id"] for listing in available], [row["listing_id"]])
+
+    def test_lost_broker_item_is_not_buyable_inventory(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_listing(
+                        item_name="Lost Ring",
+                        rarity="Rare",
+                        source="DMG 2024",
+                        category="Ring",
+                        tags="ring",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Baehotin",
+                        seller_character_level=13,
+                        sell_roll=1,
+                        seller_payout=0,
+                        sale_method="broker",
+                        sale_percent=0,
+                        dtp_cost=5,
+                        gold_cost=25,
+                        broker_roll=1,
+                        broker_result="Disaster. The item is lost during brokerage.",
+                        item_status="lost",
+                    )
+                    available = await db.list_available_listings()
+                    sold = await db.mark_listing_sold(
+                        listing_id=row["listing_id"],
+                        buyer_user_id="456",
+                        buyer_display_name="Buyer",
+                        buyer_character_name="Rhett",
+                        buyer_character_level=9,
+                        buy_price_roll_detail="test",
+                        final_sale_price=4000,
+                        realized_profit=4000,
+                    )
+                finally:
+                    await db.close()
+                return available, sold
+
+        available, sold = asyncio.run(run_case())
+
+        self.assertEqual(available, [])
+        self.assertFalse(sold)
+
+    def test_legacy_listing_with_null_sale_method_remains_buyable(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_listing(
+                        item_name="Legacy Staff",
+                        rarity="Uncommon",
+                        source="DMG 2024",
+                        category="Staff",
+                        tags="staff",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Baehotin",
+                        seller_character_level=13,
+                        sell_roll=14,
+                        seller_payout=200,
+                        sale_method=None,
+                        item_status=None,
+                    )
+                    available = await db.list_available_listings()
+                    sold = await db.mark_listing_sold(
+                        listing_id=row["listing_id"],
+                        buyer_user_id="456",
+                        buyer_display_name="Buyer",
+                        buyer_character_name="Rhett",
+                        buyer_character_level=9,
+                        buy_price_roll_detail="test",
+                        final_sale_price=400,
+                        realized_profit=200,
+                    )
+                finally:
+                    await db.close()
+                return available, sold
+
+        available, sold = asyncio.run(run_case())
+
+        self.assertEqual(len(available), 1)
+        self.assertTrue(sold)
+
+    def test_inspect_shows_sale_method_and_broker_audit(self):
+        from cogs.dwarfy import Dwarfy
+
+        listing = {
+            "listing_id": "DWF-00001",
+            "item_name": "Ring of Protection",
+            "rarity": "Rare",
+            "source": "DMG 2024",
+            "page": "294",
+            "category": "Ring",
+            "tags": "ring",
+            "seller_user_id": "123",
+            "seller_display_name": "Seller",
+            "seller_character_name": "Baehotin",
+            "seller_character_level": 13,
+            "cost_basis": 2400,
+            "status": "available",
+            "sale_method": "broker",
+            "dtp_cost": 5,
+            "gold_cost": 25,
+            "broker_roll": 18,
+            "broker_result": "Strong buyer, 60% of base price",
+            "item_status": "inventory",
+            "sell_roll": 18,
+            "seller_payout": 2400,
+            "adventure_log_receipt": "Adventure Log Receipt:\nBroker roll: 18",
+        }
+
+        output = Dwarfy._format_inspect(object.__new__(Dwarfy), listing)
+
+        self.assertIn("Sale method: broker", output)
+        self.assertIn("DTP cost: 5", output)
+        self.assertIn("Gold cost: 25gp", output)
+        self.assertIn("Broker roll: 18", output)
+        self.assertIn("Broker result: Strong buyer, 60% of base price", output)
+        self.assertIn("Item status: inventory", output)
+        self.assertIn("Stored Adventure Log Receipt:", output)
+
+    def test_shared_validation_rejects_consumables_and_artifacts(self):
+        from cogs.dwarfy import sell_validation_error
+
+        self.assertIn("Consumable=TRUE", sell_validation_error(item("Potion", consumable=True)))
+        self.assertIn("cannot price", sell_validation_error(item("Artifact", rarity="Artifact")))
 
 
 class MatchingAndDwarfyTests(unittest.TestCase):
