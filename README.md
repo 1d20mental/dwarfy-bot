@@ -386,6 +386,17 @@ These require one of the role names in `ADMIN_ROLE_NAMES`:
 - `/dwarfy void`
 - `/dwarfy reload`
 
+### Owner Commands
+
+These require either Discord server ownership or an `Owner` role:
+
+- `/dwarfy stock_add` adds a specific item from `Bot Items` to Dwarfy's inventory. The `item` field autocompletes clean item names. Generic/template items can use `variant`, such as `Longsword` for `+1 Weapon`. `cost_basis` is optional; if blank, the bot uses the same 40% direct-sale value Dwarfy would pay a player.
+- `/dwarfy stock_random` adds a weighted random batch of shop stock from the Google Sheet. By default it creates 20 permanent items and 30 consumables using an owner-stock rarity table and the sheet's item weights. `clear_first=True` voids old owner stock before adding the new batch.
+- `/dwarfy stock_clear` voids currently available owner-stocked listings. It does not delete records, and it does not touch player-sold inventory.
+- `/dwarfy stock_gold` records gold added to Dwarfy's ledger for audit purposes.
+
+Owner-stocked listings are marked separately in SQLite with `stock_source=owner_stock`. They show up in `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy` like normal shop inventory, but their origin displays as `Dwarfy stock` instead of a player seller.
+
 ## Channel Rules
 
 - `/dwarfy sell` and `/dwarfy broker` only work in `DWARFY_SELL_CHANNEL_ID`.

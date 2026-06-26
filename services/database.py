@@ -85,6 +85,11 @@ class DwarfyDatabase:
                 broker_result TEXT,
                 item_status TEXT,
                 adventure_log_receipt TEXT,
+                stock_source TEXT,
+                stock_batch_id TEXT,
+                stocked_by_user_id TEXT,
+                stocked_by_display_name TEXT,
+                stock_notes TEXT,
                 seller_user_display TEXT,
                 seller_character TEXT,
                 seller_level INTEGER,
@@ -164,6 +169,11 @@ class DwarfyDatabase:
             "broker_result": "ALTER TABLE listings ADD COLUMN broker_result TEXT",
             "item_status": "ALTER TABLE listings ADD COLUMN item_status TEXT",
             "adventure_log_receipt": "ALTER TABLE listings ADD COLUMN adventure_log_receipt TEXT",
+            "stock_source": "ALTER TABLE listings ADD COLUMN stock_source TEXT",
+            "stock_batch_id": "ALTER TABLE listings ADD COLUMN stock_batch_id TEXT",
+            "stocked_by_user_id": "ALTER TABLE listings ADD COLUMN stocked_by_user_id TEXT",
+            "stocked_by_display_name": "ALTER TABLE listings ADD COLUMN stocked_by_display_name TEXT",
+            "stock_notes": "ALTER TABLE listings ADD COLUMN stock_notes TEXT",
             "seller_user_display": "ALTER TABLE listings ADD COLUMN seller_user_display TEXT",
             "seller_character": "ALTER TABLE listings ADD COLUMN seller_character TEXT",
             "seller_level": "ALTER TABLE listings ADD COLUMN seller_level INTEGER",
@@ -224,10 +234,21 @@ class DwarfyDatabase:
         broker_result: str | None = None,
         item_status: str | None = "inventory",
         adventure_log_receipt: str | None = None,
+        stock_source: str | None = None,
+        stock_batch_id: str | None = None,
+        stocked_by_user_id: str | None = None,
+        stocked_by_display_name: str | None = None,
+        stock_notes: str | None = None,
         seller_user_display: str | None = None,
+        cost_basis: int | None = None,
+        ledger_entry_type: str = "seller_payout",
+        ledger_cash_change: int | None = None,
+        ledger_inventory_cost_change: int | None = None,
+        ledger_notes: str | None = None,
     ) -> dict[str, Any]:
         """Create an available listing after a successful player sale."""
         now = utc_now_text()
+        listing_cost_basis = seller_payout if cost_basis is None else cost_basis
         cursor = await self.db.execute(
             """
             INSERT INTO listings (
@@ -240,10 +261,12 @@ class DwarfyDatabase:
                 rules_text, json_notes, item_tags, receipt_text,
                 sale_method, sale_percent, dtp_cost, gold_cost,
                 broker_roll, broker_result, item_status, adventure_log_receipt,
+                stock_source, stock_batch_id, stocked_by_user_id, stocked_by_display_name,
+                stock_notes,
                 seller_user_display, seller_character, seller_level,
                 status, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
             """,
             (
                 None,
@@ -258,7 +281,7 @@ class DwarfyDatabase:
                 seller_character_level,
                 sell_roll,
                 seller_payout,
-                seller_payout,
+                listing_cost_basis,
                 item_clean_name,
                 listing_display_name,
                 base_item_name,
@@ -284,6 +307,11 @@ class DwarfyDatabase:
                 broker_result,
                 item_status,
                 adventure_log_receipt or receipt_text,
+                stock_source,
+                stock_batch_id,
+                stocked_by_user_id,
+                stocked_by_display_name,
+                stock_notes,
                 seller_user_display,
                 seller_character_name,
                 seller_character_level,
@@ -297,13 +325,13 @@ class DwarfyDatabase:
             (listing_id, row_id),
         )
         await self.add_ledger_entry(
-            entry_type="seller_payout",
+            entry_type=ledger_entry_type,
             listing_id=listing_id,
             item_name=item_name,
-            cash_change=-seller_payout,
-            inventory_cost_change=seller_payout,
+            cash_change=-seller_payout if ledger_cash_change is None else ledger_cash_change,
+            inventory_cost_change=listing_cost_basis if ledger_inventory_cost_change is None else ledger_inventory_cost_change,
             profit_change=0,
-            notes=f"Paid seller for {item_name}.",
+            notes=ledger_notes or f"Paid seller for {item_name}.",
             commit=False,
         )
         await self.db.commit()
@@ -496,6 +524,60 @@ class DwarfyDatabase:
         )
         await self.db.commit()
         return await self.get_listing(listing_id)
+
+    async def clear_owner_stock(
+        self,
+        *,
+        reason: str,
+        stocked_by_user_id: str,
+        stocked_by_display_name: str,
+    ) -> dict[str, int]:
+        """Void available owner-stock listings without touching player inventory."""
+        cursor = await self.db.execute(
+            """
+            SELECT COUNT(*) AS count, COALESCE(SUM(cost_basis), 0) AS cost_basis
+            FROM listings
+            WHERE status = 'available'
+              AND COALESCE(item_status, 'inventory') = 'inventory'
+              AND stock_source = 'owner_stock'
+            """
+        )
+        summary = await cursor.fetchone()
+        count = int(summary["count"])
+        cost_basis = int(summary["cost_basis"])
+        if count == 0:
+            return {"count": 0, "cost_basis": 0}
+
+        now = utc_now_text()
+        clean_reason = reason.strip() or "Owner stock reset."
+        await self.db.execute(
+            """
+            UPDATE listings
+            SET status = 'voided',
+                item_status = 'voided',
+                voided_at = ?,
+                void_reason = ?
+            WHERE status = 'available'
+              AND COALESCE(item_status, 'inventory') = 'inventory'
+              AND stock_source = 'owner_stock'
+            """,
+            (now, clean_reason),
+        )
+        await self.add_ledger_entry(
+            entry_type="owner_stock_clear",
+            listing_id=None,
+            item_name=None,
+            cash_change=0,
+            inventory_cost_change=-cost_basis,
+            profit_change=0,
+            notes=(
+                f"Owner stock reset by {stocked_by_display_name} "
+                f"({stocked_by_user_id}): {clean_reason}"
+            ),
+            commit=False,
+        )
+        await self.db.commit()
+        return {"count": count, "cost_basis": cost_basis}
 
     async def shop_stats(self) -> dict[str, Any]:
         """Return all numbers used by /dwarfy stats."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import discord
@@ -19,6 +20,7 @@ from services.pricing import (
     roll_broker_price,
     roll_buy_price,
 )
+from services.loot import RARITY_ORDER, pick_weighted_item
 from services.sheets import (
     format_item_choices,
     is_generic_template_item,
@@ -51,6 +53,20 @@ DISASTER_MESSAGES = [
     "The buyer's promissory note turns out to be theatre paper, and the courier has already vanished into the crowd.",
     "The appraiser insists on one final private inspection. By sunset, both appraiser and item are gone.",
     "A forged guild seal, a fake contract, and one very convincing handshake leave nothing behind but embarrassment.",
+]
+
+STOCK_PERMANENT_RARITY_TABLE = [
+    (1, 20, "Common"),
+    (21, 70, "Uncommon"),
+    (71, 93, "Rare"),
+    (94, 99, "Very Rare"),
+    (100, 100, "Legendary"),
+]
+STOCK_CONSUMABLE_RARITY_TABLE = [
+    (1, 30, "Common"),
+    (31, 75, "Uncommon"),
+    (76, 95, "Rare"),
+    (96, 100, "Very Rare"),
 ]
 
 
@@ -125,14 +141,87 @@ def discount_text(discount_percent: int) -> str:
     return f"{discount_percent}%"
 
 
+def listing_origin_text(listing: dict[str, Any]) -> str:
+    """Return the readable source of a listing."""
+    if listing.get("stock_source") == "owner_stock":
+        return "Dwarfy stock"
+    seller = mention_user(listing.get("seller_user_id"), listing.get("seller_display_name"))
+    seller_character = character_label(
+        listing.get("seller_character_name") or listing.get("seller_character"),
+        listing.get("seller_character_level") or listing.get("seller_level"),
+    )
+    return f"{seller} as {seller_character}"
+
+
+def new_stock_batch_id() -> str:
+    """Return a compact batch ID for owner-stock operations."""
+    return datetime.now(timezone.utc).strftime("STOCK-%Y%m%d-%H%M%S")
+
+
+def stock_rarity_from_roll(d100: int, *, consumable: bool) -> str:
+    """Roll on Dwarfy's owner-stock rarity table."""
+    table = STOCK_CONSUMABLE_RARITY_TABLE if consumable else STOCK_PERMANENT_RARITY_TABLE
+    for low, high, rarity in table:
+        if low <= d100 <= high:
+            return rarity
+    return table[-1][2]
+
+
+def stock_rarity_fallback_order(rarity: str) -> list[str]:
+    """Return rarity fallback order for stock generation."""
+    if rarity not in RARITY_ORDER:
+        return [rarity]
+    index = RARITY_ORDER.index(rarity)
+    ordered = [rarity]
+    for distance in range(1, len(RARITY_ORDER)):
+        higher = index + distance
+        lower = index - distance
+        if higher < len(RARITY_ORDER):
+            ordered.append(RARITY_ORDER[higher])
+        if lower >= 0:
+            ordered.append(RARITY_ORDER[lower])
+    return ordered
+
+
+def stock_item_pool(
+    *,
+    cache: Any,
+    rarity: str,
+    consumable: bool,
+    apl: int,
+    tag: str | None = None,
+) -> tuple[str | None, list[Any]]:
+    """Return a stockable item pool, using nearest-rarity fallback if needed."""
+    tag_norm = tag.casefold().strip() if tag else None
+    for candidate_rarity in stock_rarity_fallback_order(rarity):
+        pool = [
+            item
+            for item in cache.loot_pool(
+                rarity=candidate_rarity,
+                consumable=consumable,
+                apl=apl,
+            )
+            if item.loot_type == "Item" and is_supported_rarity(item.rarity)
+        ]
+        if tag_norm:
+            tagged = [item for item in pool if tag_norm in item.tags]
+            if tagged:
+                return candidate_rarity, tagged
+        elif pool:
+            return candidate_rarity, pool
+
+    if tag_norm:
+        return stock_item_pool(cache=cache, rarity=rarity, consumable=consumable, apl=apl)
+    return None, []
+
+
 def build_buy_receipt(
     *,
     buyer: str,
     buyer_character: str,
     listing: dict[str, Any],
     item_name: str,
-    seller: str,
-    seller_character: str,
+    origin_text: str,
     buy_roll: Any,
     gold_available: int,
 ) -> str:
@@ -144,7 +233,7 @@ def build_buy_receipt(
         f"Item: {item_name}",
         f"Rarity: {listing['rarity']}",
         f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
-        f"Original seller: {seller} as {seller_character}",
+        f"Original source: {origin_text}",
         "",
         f"Xanathar price roll: {buy_roll.roll_detail}",
         f"Base asking price: {gp(buy_roll.rolled_price)}",
@@ -290,6 +379,24 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return True
         await interaction.response.send_message(
             "Only a configured admin/mod role can use that command.",
+            ephemeral=True,
+        )
+        return False
+
+    def _is_owner(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild and interaction.guild.owner_id == interaction.user.id:
+            return True
+        role_names = {
+            role.name.casefold()
+            for role in getattr(interaction.user, "roles", [])
+        }
+        return "owner" in role_names
+
+    async def _require_owner(self, interaction: discord.Interaction) -> bool:
+        if self._is_owner(interaction):
+            return True
+        await interaction.response.send_message(
+            "Only the Discord server owner or someone with the Owner role can use that command.",
             ephemeral=True,
         )
         return False
@@ -489,6 +596,470 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         listing["receipt_text"] = receipt
         listing["adventure_log_receipt"] = receipt
         return listing, receipt
+
+    def _stock_item_autocomplete_names(self, current: str) -> list[str]:
+        """Return allowed clean item names for owner stock autocomplete."""
+        query_norm = current.casefold().strip()
+        seen: set[str] = set()
+        starts: list[str] = []
+        contains: list[str] = []
+        for sheet_item in self.bot.sheet_cache.items:
+            if not sheet_item.allowed or sheet_item.loot_type != "Item":
+                continue
+            if not is_supported_rarity(sheet_item.rarity):
+                continue
+            key = sheet_item.name.casefold().strip()
+            if key in seen:
+                continue
+            if query_norm and query_norm not in key:
+                continue
+            seen.add(key)
+            if query_norm and key.startswith(query_norm):
+                starts.append(sheet_item.name)
+            else:
+                contains.append(sheet_item.name)
+        return (starts + contains)[:25]
+
+    def _stock_variant_options(self, item_name: str, current: str) -> list[str]:
+        match = self.bot.sheet_cache.match_item(item_name, for_sell=False)
+        if match.item is None:
+            return []
+        query_norm = current.casefold().strip()
+        options: list[str] = []
+        seen: set[str] = set()
+        for option in match.item.variant_option_list:
+            key = option.casefold()
+            if key in seen:
+                continue
+            if query_norm and query_norm not in key:
+                continue
+            seen.add(key)
+            options.append(option)
+        return options[:25]
+
+    async def _resolve_stock_context(
+        self,
+        interaction: discord.Interaction,
+        *,
+        item: str,
+        variant: str | None,
+        notes: str | None,
+    ) -> dict[str, Any] | None:
+        """Validate owner-stock item input."""
+        if not await self._require_owner(interaction):
+            return None
+        if not await self._require_sheet_cache(interaction):
+            return None
+        if looks_like_pasted_item_text(item):
+            await interaction.response.send_message(
+                "Use only the clean item name in the item field. The bot already knows the item data.",
+                ephemeral=True,
+            )
+            return None
+
+        match = self.bot.sheet_cache.match_item(item, for_sell=False)
+        if match.choices:
+            await interaction.response.send_message(
+                f"{match.message or 'I found multiple possible item matches.'} Please run the command again with one exact item name:\n"
+                f"{format_item_choices(match.choices)}",
+                ephemeral=True,
+            )
+            return None
+        if match.item is None:
+            await interaction.response.send_message(
+                match.message or f"I could not find `{item}` in the cached Bot Items sheet.",
+                ephemeral=True,
+            )
+            return None
+
+        sheet_item = match.item
+        if not sheet_item.allowed:
+            await interaction.response.send_message(
+                f"`{sheet_item.name}` is Allowed=FALSE and cannot be stocked.",
+                ephemeral=True,
+            )
+            return None
+        if sheet_item.loot_type != "Item":
+            await interaction.response.send_message(
+                f"`{sheet_item.name}` is Loot Type={sheet_item.loot_type}; owner stock can only add actual items.",
+                ephemeral=True,
+            )
+            return None
+        if not is_supported_rarity(sheet_item.rarity):
+            await interaction.response.send_message(
+                f"Dwarfy cannot price `{sheet_item.rarity}` items in version 1.",
+                ephemeral=True,
+            )
+            return None
+
+        variant_clean = (variant or "").strip() or None
+        notes_clean = (notes or "").strip() or None
+        is_template = is_generic_template_item(sheet_item)
+        if variant_clean and not is_template:
+            await interaction.response.send_message(
+                "Variant is only used for generic/template items. This item is already specific.",
+                ephemeral=True,
+            )
+            return None
+        if notes_clean and not is_template and looks_like_pasted_detail_text(notes_clean):
+            await interaction.response.send_message(
+                "Use notes only for short custom stock notes, not full item rules text.",
+                ephemeral=True,
+            )
+            return None
+
+        return {
+            "sheet_item": sheet_item,
+            "variant_clean": variant_clean,
+            "notes_clean": notes_clean,
+            "listing_name": resolved_listing_name(sheet_item.name, variant_clean),
+        }
+
+    async def _create_owner_stock_listing(
+        self,
+        interaction: discord.Interaction,
+        *,
+        sheet_item: Any,
+        listing_name: str,
+        variant: str | None,
+        notes: str | None,
+        cost_basis: int,
+        batch_id: str,
+    ) -> dict[str, Any]:
+        """Create a Dwarfy-owned stock listing."""
+        return await self.bot.db.create_listing(
+            item_name=listing_name,
+            rarity=sheet_item.rarity,
+            source=sheet_item.source,
+            category=sheet_item.category,
+            tags=sheet_item.tags_text,
+            seller_user_id="",
+            seller_display_name="Dwarfy Stock",
+            seller_character_name="Dwarfy Stock",
+            seller_character_level=0,
+            sell_roll=0,
+            seller_payout=0,
+            cost_basis=cost_basis,
+            item_clean_name=sheet_item.name,
+            listing_display_name=listing_name,
+            base_item_name=sheet_item.name if variant else None,
+            variant=variant,
+            details=notes,
+            variant_details=variant,
+            variant_type=sheet_item.variant_type or None,
+            variant_instructions=sheet_item.variant_instructions or None,
+            item_type=sheet_item.item_type or None,
+            attunement=sheet_item.attunement or None,
+            page=sheet_item.page or None,
+            display_detail=sheet_item.display_detail or None,
+            short_description=sheet_item.short_description or None,
+            rules_text=sheet_item.rules_text or None,
+            json_notes=sheet_item.json_notes or None,
+            item_tags=sheet_item.item_tags or None,
+            sale_method="owner_stock",
+            sale_percent=0,
+            item_status="inventory",
+            stock_source="owner_stock",
+            stock_batch_id=batch_id,
+            stocked_by_user_id=str(interaction.user.id),
+            stocked_by_display_name=_display_name(interaction.user),
+            stock_notes=notes,
+            seller_user_display="Dwarfy Stock",
+            ledger_entry_type="owner_stock_item",
+            ledger_cash_change=0,
+            ledger_inventory_cost_change=cost_basis,
+            ledger_notes=f"Owner stocked {listing_name} with cost basis {gp(cost_basis)}.",
+        )
+
+    @app_commands.command(name="stock_add", description="Owner only: add one item to Dwarfy's inventory.")
+    @app_commands.describe(
+        item="Clean item name from Bot Items.",
+        quantity="How many copies to add. Defaults to 1.",
+        cost_basis="Optional Dwarfy cost basis. Defaults to the 40% direct-sale payout.",
+        variant="Optional identity for generic/template items, such as Longsword.",
+        notes="Optional stock note for staff audit.",
+    )
+    async def stock_add(
+        self,
+        interaction: discord.Interaction,
+        item: str,
+        quantity: int = 1,
+        cost_basis: int | None = None,
+        variant: str | None = None,
+        notes: str | None = None,
+    ) -> None:
+        context = await self._resolve_stock_context(
+            interaction,
+            item=item,
+            variant=variant,
+            notes=notes,
+        )
+        if context is None:
+            return
+
+        if quantity < 1 or quantity > 25:
+            await interaction.response.send_message(
+                "`quantity` must be between 1 and 25.",
+                ephemeral=True,
+            )
+            return
+        if cost_basis is not None and (cost_basis < 0 or cost_basis > 10_000_000):
+            await interaction.response.send_message(
+                "`cost_basis` must be between 0 and 10,000,000gp.",
+                ephemeral=True,
+            )
+            return
+
+        sheet_item = context["sheet_item"]
+        default_cost_basis = direct_sell_price(sheet_item.rarity).seller_payout
+        final_cost_basis = default_cost_basis if cost_basis is None else int(cost_basis)
+        batch_id = new_stock_batch_id()
+        rows: list[dict[str, Any]] = []
+        for _ in range(int(quantity)):
+            rows.append(
+                await self._create_owner_stock_listing(
+                    interaction,
+                    sheet_item=sheet_item,
+                    listing_name=context["listing_name"],
+                    variant=context["variant_clean"],
+                    notes=context["notes_clean"],
+                    cost_basis=final_cost_basis,
+                    batch_id=batch_id,
+                )
+            )
+
+        listing_ids = ", ".join(row["listing_id"] for row in rows)
+        output = (
+            "Owner stock added.\n\n"
+            f"Item: {context['listing_name']}\n"
+            f"Quantity: {len(rows)}\n"
+            f"Rarity: {sheet_item.rarity}\n"
+            f"Source: {source_with_page(sheet_item.source, sheet_item.page)}\n"
+            f"Cost basis each: {gp(final_cost_basis)}\n"
+            f"Batch: {batch_id}\n"
+            f"Listings: {listing_ids}"
+        )
+        if context["notes_clean"]:
+            output += f"\nNotes: {context['notes_clean']}"
+        await send_text_response(interaction, output, ephemeral=True)
+
+    @stock_add.autocomplete("item")
+    async def stock_add_item_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not self.bot.sheet_cache.loaded:
+            return []
+        return [
+            app_commands.Choice(name=name[:100], value=name[:100])
+            for name in self._stock_item_autocomplete_names(current)
+        ]
+
+    @stock_add.autocomplete("variant")
+    async def stock_add_variant_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not self.bot.sheet_cache.loaded:
+            return []
+        item_name = getattr(interaction.namespace, "item", "") or ""
+        return [
+            app_commands.Choice(name=name[:100], value=name[:100])
+            for name in self._stock_variant_options(item_name, current)
+        ]
+
+    @app_commands.command(name="stock_gold", description="Owner only: record gold added to Dwarfy's ledger.")
+    @app_commands.describe(
+        amount="Gold amount to add to Dwarfy's ledger.",
+        reason="Optional audit reason.",
+    )
+    async def stock_gold(
+        self,
+        interaction: discord.Interaction,
+        amount: app_commands.Range[int, 1, 100_000_000],
+        reason: str | None = None,
+    ) -> None:
+        if not await self._require_owner(interaction):
+            return
+        note = (reason or "Owner added shop gold.").strip()
+        await self.bot.db.add_ledger_entry(
+            entry_type="owner_gold",
+            listing_id=None,
+            item_name=None,
+            cash_change=int(amount),
+            inventory_cost_change=0,
+            profit_change=0,
+            notes=f"Owner gold added by {_display_name(interaction.user)} ({interaction.user.id}): {note}",
+        )
+        await interaction.response.send_message(
+            f"Owner gold added to Dwarfy's ledger: {gp(int(amount))}\nReason: {note}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="stock_clear", description="Owner only: void all owner-stocked inventory.")
+    @app_commands.describe(
+        confirm="Must be True to clear owner-stocked inventory.",
+        reason="Audit reason for the reset.",
+    )
+    async def stock_clear(
+        self,
+        interaction: discord.Interaction,
+        confirm: bool,
+        reason: str | None = None,
+    ) -> None:
+        if not await self._require_owner(interaction):
+            return
+        if not confirm:
+            await interaction.response.send_message(
+                "No stock was cleared. Run again with confirm=True to reset owner-stocked items.",
+                ephemeral=True,
+            )
+            return
+        summary = await self.bot.db.clear_owner_stock(
+            reason=(reason or "Owner stock reset.").strip(),
+            stocked_by_user_id=str(interaction.user.id),
+            stocked_by_display_name=_display_name(interaction.user),
+        )
+        await interaction.response.send_message(
+            (
+                "Owner stock reset complete.\n\n"
+                f"Listings voided: {summary['count']}\n"
+                f"Inventory cost basis removed: {gp(summary['cost_basis'])}\n"
+                "Player-sold inventory was not changed."
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="stock_random", description="Owner only: add random weighted shop stock.")
+    @app_commands.describe(
+        permanent_count="Permanent item count. Defaults to 20.",
+        consumable_count="Consumable item count. Defaults to 30.",
+        apl="APL band to use for sheet eligibility. Defaults to 10.",
+        tag="Optional tag preference.",
+        clear_first="Void existing owner stock before adding the new batch.",
+    )
+    async def stock_random(
+        self,
+        interaction: discord.Interaction,
+        permanent_count: int = 20,
+        consumable_count: int = 30,
+        apl: int = 10,
+        tag: str | None = None,
+        clear_first: bool = False,
+    ) -> None:
+        if not await self._require_owner(interaction):
+            return
+        if not await self._require_sheet_cache(interaction):
+            return
+        if not 0 <= permanent_count <= 100 or not 0 <= consumable_count <= 100:
+            await interaction.response.send_message(
+                "`permanent_count` and `consumable_count` must each be between 0 and 100.",
+                ephemeral=True,
+            )
+            return
+        if not 1 <= apl <= 20:
+            await interaction.response.send_message(
+                "`apl` must be between 1 and 20.",
+                ephemeral=True,
+            )
+            return
+        if permanent_count == 0 and consumable_count == 0:
+            await interaction.response.send_message(
+                "Choose at least one permanent or consumable item to stock.",
+                ephemeral=True,
+            )
+            return
+
+        clear_summary = {"count": 0, "cost_basis": 0}
+        if clear_first:
+            clear_summary = await self.bot.db.clear_owner_stock(
+                reason="Owner random restock.",
+                stocked_by_user_id=str(interaction.user.id),
+                stocked_by_display_name=_display_name(interaction.user),
+            )
+
+        batch_id = new_stock_batch_id()
+        created: list[dict[str, Any]] = []
+        audit_lines: list[str] = []
+        selected_permanent_names: set[str] = set()
+
+        async def add_random_slot(index: int, *, consumable: bool) -> None:
+            d100 = random.randint(1, 100)
+            rolled_rarity = stock_rarity_from_roll(d100, consumable=consumable)
+            selected_rarity, pool = stock_item_pool(
+                cache=self.bot.sheet_cache,
+                rarity=rolled_rarity,
+                consumable=consumable,
+                apl=int(apl),
+                tag=tag,
+            )
+            if not pool or selected_rarity is None:
+                slot_type = "Consumable" if consumable else "Permanent"
+                audit_lines.append(
+                    f"{slot_type} {index}: d100 {d100} -> {rolled_rarity} -> skipped, no eligible sheet pool."
+                )
+                return
+
+            final_pool = pool
+            if not consumable:
+                without_duplicates = [
+                    item for item in pool if item.name.casefold() not in selected_permanent_names
+                ]
+                if without_duplicates:
+                    final_pool = without_duplicates
+
+            selection = pick_weighted_item(final_pool)
+            sheet_item = selection.item
+            if not consumable:
+                selected_permanent_names.add(sheet_item.name.casefold())
+            cost_basis = direct_sell_price(sheet_item.rarity).seller_payout
+            row = await self._create_owner_stock_listing(
+                interaction,
+                sheet_item=sheet_item,
+                listing_name=sheet_item.name,
+                variant=None,
+                notes=f"Random owner stock batch {batch_id}.",
+                cost_basis=cost_basis,
+                batch_id=batch_id,
+            )
+            created.append(row)
+            fallback_text = "" if selected_rarity == rolled_rarity else f", fallback to {selected_rarity}"
+            slot_type = "Consumable" if consumable else "Permanent"
+            audit_lines.append(
+                (
+                    f"{slot_type} {index}: d100 {d100} -> {rolled_rarity}{fallback_text} -> "
+                    f"{row['listing_id']} {sheet_item.name} "
+                    f"(ticket {selection.ticket}/{selection.total_weight})"
+                )
+            )
+
+        for index in range(1, int(permanent_count) + 1):
+            await add_random_slot(index, consumable=False)
+        for index in range(1, int(consumable_count) + 1):
+            await add_random_slot(index, consumable=True)
+
+        lines = [
+            "Random owner stock complete.",
+            "",
+            f"Batch: {batch_id}",
+            f"APL filter: {int(apl)}",
+            f"Tag preference: {tag.strip() if tag else 'none'}",
+            f"Listings created: {len(created)}",
+        ]
+        if clear_first:
+            lines.extend(
+                [
+                    f"Previous owner-stock listings voided: {clear_summary['count']}",
+                    f"Previous owner-stock cost basis removed: {gp(clear_summary['cost_basis'])}",
+                ]
+            )
+        lines.extend(["", "Audit:"])
+        lines.extend(audit_lines[:60])
+        if len(audit_lines) > 60:
+            lines.append(f"...and {len(audit_lines) - 60} more audit lines.")
+        await send_text_response(interaction, "\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="sell", description="Sell a permanent magic item to Dwarfy's Shop.")
     @app_commands.describe(
@@ -836,17 +1407,13 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         ]
         for listing, low, high in shown:
             display_name = listing_display_name(listing)
-            seller = mention_user(listing["seller_user_id"], listing["seller_display_name"])
-            seller_character = character_label(
-                listing["seller_character_name"],
-                listing["seller_character_level"],
-            )
+            origin = listing_origin_text(listing)
             lines.extend(
                 [
                     f"{listing['listing_id']} \u2014 {display_name} \u2014 {listing['rarity']}",
                     (
                         f"Source: {listing['source'] or 'Unknown'} | Price on buy: "
-                        f"{price_range_text(low, high)} | Original seller: {seller} as {seller_character}"
+                        f"{price_range_text(low, high)} | Origin: {origin}"
                     ),
                     "",
                 ]
@@ -919,7 +1486,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 f"Item detail: {listing.get('display_detail') or listing.get('item_type') or 'none'}",
                 f"Short description: {listing.get('short_description') or 'none'}",
                 f"Sale method: {listing.get('sale_method') or 'unknown/legacy'}",
-                f"Original seller: {seller} as {seller_character}",
+                f"Original source: {listing_origin_text(listing)}",
                 f"Seller payout: {gp(int(listing.get('seller_payout') or 0))}",
                 f"Dwarfy cost basis: {gp(int(listing['cost_basis']))}",
                 f"DTP cost: {listing.get('dtp_cost') if listing.get('dtp_cost') is not None else 'unknown'}",
@@ -940,6 +1507,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             lines.append(f"Variant type: {listing['variant_type']}")
         if listing.get("variant_instructions"):
             lines.append(f"Variant instructions: {listing['variant_instructions']}")
+        if listing.get("stock_source") == "owner_stock":
+            lines.append(f"Stock batch: {listing.get('stock_batch_id') or 'none'}")
+            lines.append(f"Stock notes: {listing.get('stock_notes') or 'none'}")
 
         if listing["status"] == "sold":
             buyer = mention_user(listing.get("buyer_user_id"), listing.get("buyer_display_name"))
@@ -1046,11 +1616,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         cost_basis = int(row["cost_basis"])
         buyer = interaction.user.mention
         buyer_character = character_label(character, int(level))
-        seller = mention_user(row["seller_user_id"], row["seller_display_name"])
-        seller_character = character_label(
-            row["seller_character_name"],
-            row["seller_character_level"],
-        )
+        origin = listing_origin_text(row)
         debt_owed = max(0, buy_roll.final_price - gold_available)
         debt_fine = 5_000 if debt_owed else 0
         debt_total = debt_owed + debt_fine
@@ -1060,8 +1626,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             buyer_character=buyer_character,
             listing=row,
             item_name=item_name,
-            seller=seller,
-            seller_character=seller_character,
+            origin_text=origin,
             buy_roll=buy_roll,
             gold_available=gold_available,
         )

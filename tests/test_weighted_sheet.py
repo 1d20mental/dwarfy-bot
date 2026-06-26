@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from services.loot import (
@@ -822,8 +823,7 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
             buyer_character="Jimmy (1)",
             listing=listing,
             item_name="Bag of Holding",
-            seller="@Seller",
-            seller_character="Rebecca (1)",
+            origin_text="@Seller as Rebecca (1)",
             buy_roll=result,
             gold_available=1000,
         )
@@ -851,8 +851,7 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
             buyer_character="Jimmy (1)",
             listing=listing,
             item_name="Ring of Protection",
-            seller="@Seller",
-            seller_character="Rebecca (1)",
+            origin_text="@Seller as Rebecca (1)",
             buy_roll=result,
             gold_available=7000,
         )
@@ -1143,3 +1142,150 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         with patch("services.pricing.random.randint", return_value=1):
             roll = roll_buy_price("Uncommon", 400)
         self.assertEqual(roll.final_price, 400)
+
+    def test_owner_stock_origin_text_is_not_a_fake_seller(self):
+        from cogs.dwarfy import listing_origin_text
+
+        self.assertEqual(
+            listing_origin_text(
+                {
+                    "stock_source": "owner_stock",
+                    "seller_user_id": "",
+                    "seller_display_name": "Dwarfy Stock",
+                    "seller_character_name": "Dwarfy Stock",
+                    "seller_character_level": 0,
+                }
+            ),
+            "Dwarfy stock",
+        )
+
+    def test_owner_stock_rarity_table_has_expected_shape(self):
+        from cogs.dwarfy import stock_rarity_from_roll
+
+        self.assertEqual(stock_rarity_from_roll(20, consumable=False), "Common")
+        self.assertEqual(stock_rarity_from_roll(21, consumable=False), "Uncommon")
+        self.assertEqual(stock_rarity_from_roll(94, consumable=False), "Very Rare")
+        self.assertEqual(stock_rarity_from_roll(100, consumable=False), "Legendary")
+        self.assertEqual(stock_rarity_from_roll(96, consumable=True), "Very Rare")
+
+    def test_owner_stock_item_pool_uses_nearest_rarity_fallback(self):
+        from cogs.dwarfy import stock_item_pool
+
+        cache = make_cache(
+            [
+                item("Uncommon Permanent", rarity="Uncommon", roll_rarity="Uncommon", consumable=False),
+                item("Monster Trigger", rarity="Common", roll_rarity="Common", loot_type="Monster Component"),
+            ]
+        )
+
+        selected_rarity, pool = stock_item_pool(cache=cache, rarity="Common", consumable=False, apl=9)
+
+        self.assertEqual(selected_rarity, "Uncommon")
+        self.assertEqual([entry.name for entry in pool], ["Uncommon Permanent"])
+
+    def test_owner_stock_autocomplete_is_unique_and_allows_consumables(self):
+        from cogs.dwarfy import Dwarfy
+
+        cache = make_cache(
+            [
+                item("Bag of Holding", consumable=False),
+                item("Bag of Holding", consumable=False, min_apl=5),
+                item("Potion of Healing", consumable=True),
+                item("Forbidden Item", allowed=False),
+                item("Monster Trigger", loot_type="Monster Component"),
+            ]
+        )
+        cog = object.__new__(Dwarfy)
+        cog.bot = SimpleNamespace(sheet_cache=cache)
+
+        names = cog._stock_item_autocomplete_names("")
+
+        self.assertEqual(names, ["Bag of Holding", "Potion of Healing"])
+
+    def test_owner_stock_clear_only_voids_owner_stock(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    owner_row = await db.create_listing(
+                        item_name="Owner Bag",
+                        rarity="Uncommon",
+                        source="DMG 2024",
+                        category="Wondrous item",
+                        tags="storage",
+                        seller_user_id="",
+                        seller_display_name="Dwarfy Stock",
+                        seller_character_name="Dwarfy Stock",
+                        seller_character_level=0,
+                        sell_roll=0,
+                        seller_payout=0,
+                        cost_basis=160,
+                        stock_source="owner_stock",
+                        stock_batch_id="STOCK-TEST",
+                        item_status="inventory",
+                        ledger_entry_type="owner_stock_item",
+                        ledger_cash_change=0,
+                        ledger_inventory_cost_change=160,
+                    )
+                    player_row = await db.create_listing(
+                        item_name="Player Bag",
+                        rarity="Uncommon",
+                        source="DMG 2024",
+                        category="Wondrous item",
+                        tags="storage",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Rhett",
+                        seller_character_level=9,
+                        sell_roll=0,
+                        seller_payout=160,
+                    )
+
+                    before = await db.list_available_listings()
+                    summary = await db.clear_owner_stock(
+                        reason="test reset",
+                        stocked_by_user_id="1",
+                        stocked_by_display_name="Owner",
+                    )
+                    owner_after = await db.get_listing(owner_row["listing_id"])
+                    player_after = await db.get_listing(player_row["listing_id"])
+                    after = await db.list_available_listings()
+                finally:
+                    await db.close()
+                return before, summary, owner_after, player_after, after
+
+        before, summary, owner_after, player_after, after = asyncio.run(run_case())
+
+        self.assertEqual(len(before), 2)
+        self.assertEqual(summary, {"count": 1, "cost_basis": 160})
+        self.assertEqual(owner_after["status"], "voided")
+        self.assertEqual(player_after["status"], "available")
+        self.assertEqual([row["item_name"] for row in after], ["Player Bag"])
+
+    def test_buy_receipt_can_show_owner_stock_origin(self):
+        from cogs.dwarfy import build_buy_receipt
+
+        listing = {
+            "listing_id": "DWF-00077",
+            "rarity": "Uncommon",
+            "source": "DMG 2024",
+            "page": "234",
+            "cost_basis": 160,
+        }
+        with patch("services.pricing.random.randint", side_effect=[6, 14]):
+            result = roll_buy_price("Uncommon", 160)
+
+        receipt = build_buy_receipt(
+            buyer="@Buyer",
+            buyer_character="Jimmy (1)",
+            listing=listing,
+            item_name="Bag of Holding",
+            origin_text="Dwarfy stock",
+            buy_roll=result,
+            gold_available=1000,
+        )
+
+        self.assertIn("Original source: Dwarfy stock", receipt)
