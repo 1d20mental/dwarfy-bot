@@ -148,6 +148,23 @@ class DwarfyDatabase:
         )
         await self.db.execute(
             """
+            CREATE TABLE IF NOT EXISTS characters (
+                id INTEGER PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                user_display_name TEXT NOT NULL,
+                character_name TEXT NOT NULL COLLATE NOCASE,
+                character_level INTEGER NOT NULL,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                is_retired INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                retired_at TEXT,
+                UNIQUE(user_id, character_name)
+            )
+            """
+        )
+        await self.db.execute(
+            """
             CREATE TABLE IF NOT EXISTS classifieds (
                 id INTEGER PRIMARY KEY,
                 classified_id TEXT UNIQUE,
@@ -197,6 +214,147 @@ class DwarfyDatabase:
         await self._migrate_listings_table()
         await self._migrate_classifieds_table()
         await self.db.commit()
+
+    async def _ensure_default_character(self, user_id: str) -> None:
+        """Make sure one active character is marked default when possible."""
+        cursor = await self.db.execute(
+            """
+            SELECT id FROM characters
+            WHERE user_id = ? AND is_retired = 0 AND is_default = 1
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        if await cursor.fetchone():
+            return
+        cursor = await self.db.execute(
+            """
+            SELECT id FROM characters
+            WHERE user_id = ? AND is_retired = 0
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        if row:
+            await self.db.execute(
+                "UPDATE characters SET is_default = 1 WHERE id = ?",
+                (row["id"],),
+            )
+
+    async def save_character(
+        self,
+        *,
+        user_id: str,
+        user_display_name: str,
+        character_name: str,
+        character_level: int,
+        make_default: bool = False,
+    ) -> dict[str, Any]:
+        """Create or update one user's character registration."""
+        now = utc_now_text()
+        name = character_name.strip()
+        await self.db.execute(
+            """
+            INSERT INTO characters (
+                user_id, user_display_name, character_name, character_level,
+                is_default, is_retired, created_at, updated_at, retired_at
+            )
+            VALUES (?, ?, ?, ?, 0, 0, ?, ?, NULL)
+            ON CONFLICT(user_id, character_name) DO UPDATE SET
+                user_display_name = excluded.user_display_name,
+                character_level = excluded.character_level,
+                is_retired = 0,
+                retired_at = NULL,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, user_display_name, name, int(character_level), now, now),
+        )
+        if make_default:
+            await self.db.execute(
+                "UPDATE characters SET is_default = 0 WHERE user_id = ?",
+                (user_id,),
+            )
+            await self.db.execute(
+                """
+                UPDATE characters
+                SET is_default = 1
+                WHERE user_id = ? AND character_name = ?
+                """,
+                (user_id, name),
+            )
+        await self._ensure_default_character(user_id)
+        await self.db.commit()
+        row = await self.get_character(user_id=user_id, character_name=name)
+        return row or {}
+
+    async def get_character(self, *, user_id: str, character_name: str) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            """
+            SELECT * FROM characters
+            WHERE user_id = ? AND character_name = ?
+            """,
+            (user_id, character_name.strip()),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_characters(
+        self,
+        *,
+        user_id: str,
+        include_retired: bool = False,
+    ) -> list[dict[str, Any]]:
+        where = "user_id = ?"
+        if not include_retired:
+            where += " AND is_retired = 0"
+        cursor = await self.db.execute(
+            f"""
+            SELECT * FROM characters
+            WHERE {where}
+            ORDER BY is_default DESC, is_retired ASC, character_name COLLATE NOCASE ASC
+            """,
+            (user_id,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def set_default_character(self, *, user_id: str, character_name: str) -> dict[str, Any] | None:
+        row = await self.get_character(user_id=user_id, character_name=character_name)
+        if row is None or int(row["is_retired"]):
+            return None
+        await self.db.execute(
+            "UPDATE characters SET is_default = 0 WHERE user_id = ?",
+            (user_id,),
+        )
+        now = utc_now_text()
+        await self.db.execute(
+            """
+            UPDATE characters
+            SET is_default = 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, row["id"]),
+        )
+        await self.db.commit()
+        return await self.get_character(user_id=user_id, character_name=character_name)
+
+    async def retire_character(self, *, user_id: str, character_name: str) -> dict[str, Any] | None:
+        row = await self.get_character(user_id=user_id, character_name=character_name)
+        if row is None or int(row["is_retired"]):
+            return None
+        now = utc_now_text()
+        await self.db.execute(
+            """
+            UPDATE characters
+            SET is_default = 0, is_retired = 1, updated_at = ?, retired_at = ?
+            WHERE id = ?
+            """,
+            (now, now, row["id"]),
+        )
+        await self._ensure_default_character(user_id)
+        await self.db.commit()
+        return await self.get_character(user_id=user_id, character_name=character_name)
 
     async def _migrate_listings_table(self) -> None:
         """Add new nullable columns without touching existing listing data."""

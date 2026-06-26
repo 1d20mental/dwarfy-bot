@@ -1741,6 +1741,94 @@ class ClassifiedsTests(unittest.TestCase):
         self.assertIn("Sale Method", field_names)
 
 
+class CharacterRegistryTests(unittest.TestCase):
+    def test_character_registry_saves_updates_defaults_and_retires(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    first = await db.save_character(
+                        user_id="123",
+                        user_display_name="Player",
+                        character_name="Baehotin",
+                        character_level=13,
+                    )
+                    second = await db.save_character(
+                        user_id="123",
+                        user_display_name="Player",
+                        character_name="Jimmy Noknees",
+                        character_level=1,
+                    )
+                    active = await db.set_default_character(
+                        user_id="123",
+                        character_name="Jimmy Noknees",
+                    )
+                    updated = await db.save_character(
+                        user_id="123",
+                        user_display_name="Player",
+                        character_name="Jimmy Noknees",
+                        character_level=2,
+                    )
+                    retired = await db.retire_character(
+                        user_id="123",
+                        character_name="Jimmy Noknees",
+                    )
+                    visible = await db.list_characters(user_id="123")
+                    all_rows = await db.list_characters(user_id="123", include_retired=True)
+                finally:
+                    await db.close()
+                return first, second, active, updated, retired, visible, all_rows
+
+        first, second, active, updated, retired, visible, all_rows = asyncio.run(run_case())
+
+        self.assertEqual(first["character_name"], "Baehotin")
+        self.assertEqual(second["character_name"], "Jimmy Noknees")
+        self.assertEqual(active["character_name"], "Jimmy Noknees")
+        self.assertEqual(updated["character_level"], 2)
+        self.assertEqual(retired["is_retired"], 1)
+        self.assertEqual([row["character_name"] for row in visible], ["Baehotin"])
+        self.assertEqual(visible[0]["is_default"], 1)
+        self.assertEqual(len(all_rows), 2)
+
+    def test_character_list_output_and_choices_are_clean(self):
+        from cogs.dwarfy import build_character_list_output, character_choice_label
+
+        rows = [
+            {
+                "character_name": "Baehotin",
+                "character_level": 13,
+                "is_default": 1,
+                "is_retired": 0,
+            },
+            {
+                "character_name": "Jimmy Noknees",
+                "character_level": 2,
+                "is_default": 0,
+                "is_retired": 1,
+            },
+        ]
+
+        output = build_character_list_output(rows)
+
+        self.assertEqual(character_choice_label(rows[0]), "Baehotin (13) - active")
+        self.assertIn("Baehotin (13) - active", output)
+        self.assertIn("Jimmy Noknees (2) - retired", output)
+        self.assertIn("autocomplete", output)
+
+    def test_classified_post_headline_includes_character(self):
+        from cogs.dwarfy import classified_post_headline
+
+        output = classified_post_headline("@Player", "Baehotin", 13, "Ring of Protection")
+
+        self.assertEqual(
+            output,
+            "@Player as Baehotin (13) posts Ring of Protection on Dwarfy's Classifieds.",
+        )
+
+
 class HelpCommandTests(unittest.TestCase):
     def test_help_overview_mentions_core_player_flows(self):
         from cogs.dwarfy import build_help_embed
@@ -1749,6 +1837,7 @@ class HelpCommandTests(unittest.TestCase):
         text = "\n".join([embed.title or "", embed.description or ""] + [field.value for field in embed.fields])
 
         self.assertIn("/sessionloot", text)
+        self.assertIn("/dwarfy character_add", text)
         self.assertIn("/dwarfy browse", text)
         self.assertIn("/dwarfy sell", text)
         self.assertIn("/dwarfy classified_post", text)
@@ -1777,6 +1866,16 @@ class HelpCommandTests(unittest.TestCase):
         self.assertIn("The price is what the buyer pays", text)
         self.assertIn("withholds a 20% commission", text)
         self.assertIn("seller receives the buyer price minus", text.casefold())
+
+    def test_help_characters_mentions_registry_commands(self):
+        from cogs.dwarfy import build_help_embed
+
+        embed = build_help_embed("characters")
+        text = "\n".join([embed.description or ""] + [field.value for field in embed.fields])
+
+        self.assertIn("/dwarfy character_add", text)
+        self.assertIn("/dwarfy character_list", text)
+        self.assertIn("autocomplete", text)
 
     def test_help_channel_topic_explains_privacy(self):
         from cogs.dwarfy import build_help_embed

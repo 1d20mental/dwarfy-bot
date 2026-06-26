@@ -366,13 +366,14 @@ If Google Sheets cannot load, the bot still starts when possible. Sheet-dependen
 
 After that, test the shop flow:
 
-1. In the sell channel, run `/dwarfy sell character:Name level:5 item:Bag of Holding`.
-2. In the sell channel, run `/dwarfy broker character:Name level:5 item:Bag of Holding`.
-3. For a generic/template item, run `/dwarfy sell character:Name level:5 item:+1 Weapon variant:Longsword`.
-4. In the shop channel, run `/dwarfy browse`.
-5. Run `/dwarfy inspect listing:DWF-00001`.
-6. Run `/dwarfy buy listing:DWF-00001 character:Other Name level:5 gold:2000`.
-7. Try `/dwarfy classified_post` and `/dwarfy classified_browse` in the classifieds channel, or the shop channel if `DWARFY_CLASSIFIED_CHANNEL_ID` is blank.
+1. Run `/dwarfy character_add name:Name level:5`.
+2. In the sell channel, run `/dwarfy sell character:Name level:5 item:Bag of Holding`.
+3. In the sell channel, run `/dwarfy broker character:Name level:5 item:Bag of Holding`.
+4. For a generic/template item, run `/dwarfy sell character:Name level:5 item:+1 Weapon variant:Longsword`.
+5. In the shop channel, run `/dwarfy browse`.
+6. Run `/dwarfy inspect listing:DWF-00001`.
+7. Run `/dwarfy buy listing:DWF-00001 character:Other Name level:5 gold:2000`.
+8. Try `/dwarfy classified_post` and `/dwarfy classified_browse` in the classifieds channel, or the shop channel if `DWARFY_CLASSIFIED_CHANNEL_ID` is blank.
 
 ## Commands
 
@@ -380,6 +381,11 @@ After that, test the shop flow:
 
 - `/dwarfy ping`
 - `/dwarfy help`
+- `/dwarfy character_add`
+- `/dwarfy character_update`
+- `/dwarfy character_list`
+- `/dwarfy character_set_active`
+- `/dwarfy character_retire`
 - `/dwarfy sell`
 - `/dwarfy broker`
 - `/dwarfy browse`
@@ -427,6 +433,23 @@ Owner-stocked listings are marked separately in SQLite with `stock_source=owner_
 Wrong-channel errors are private.
 
 `/dwarfy browse`, `/dwarfy inspect`, `/dwarfy classified_browse`, and `/dwarfy classified_inspect` replies are private to the person who ran the command so shop lookups do not clutter the channel. Browse uses a paginated item card with Previous and Next buttons. The Show All button sends the matching list as copyable plain text, up to a safety cap, split across private follow-up messages when needed. Completed sales, brokered sales, purchases, classified postings, classified buys, and session loot remain public audit messages.
+
+## Character Registration
+
+Character registration is optional, but it makes Dwarfy easier to use.
+
+Use `/dwarfy character_add name:<character> level:<level>` to save one of your characters. Use `make_active:True` if you want that character marked as your active/default character. The first active registered character becomes active automatically.
+
+Useful commands:
+
+- `/dwarfy character_list` privately shows your saved characters.
+- `/dwarfy character_update` updates a saved character's level.
+- `/dwarfy character_set_active` changes your active/default character.
+- `/dwarfy character_retire` hides an old character from autocomplete.
+
+Character fields on `/dwarfy sell`, `/dwarfy broker`, `/dwarfy buy`, `/dwarfy classified_post`, and `/dwarfy classified_buy` autocomplete your saved character names. Successful transactions also remember the submitted character name and level for future autocomplete.
+
+Registration does not check character sheets. It is only a convenience layer so logs, receipts, and future Dwarfy progress can consistently associate a Discord user with character names.
 
 ## Buying From Dwarfy
 
