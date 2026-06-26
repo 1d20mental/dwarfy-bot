@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import random
 import re
 from datetime import datetime, timezone
@@ -39,6 +41,7 @@ from utils.formatting import (
 
 
 LISTING_ID_RE = re.compile(r"\bDWF\s*[-\u2010-\u2015\u2212]?\s*(\d+)\b", re.IGNORECASE)
+CLASSIFIED_ID_RE = re.compile(r"\bDWC\s*[-\u2010-\u2015\u2212]?\s*(\d+)\b", re.IGNORECASE)
 BROWSE_RARITY_CHOICES = [
     app_commands.Choice(name="Common", value="Common"),
     app_commands.Choice(name="Uncommon", value="Uncommon"),
@@ -51,6 +54,7 @@ BROWSE_LISTING_CAP = 100
 BROWSE_PAGE_SIZE = 10
 DEFAULT_RANDOM_PERMANENT_COUNT = 10
 DEFAULT_RANDOM_CONSUMABLE_COUNT = 15
+CLASSIFIED_FEE_PERCENT = 20
 RARITY_COLORS = {
     "Common": 0x8A8F98,
     "Uncommon": 0x2ECC71,
@@ -123,6 +127,15 @@ def parse_listing_id(value: str) -> str | None:
     return f"DWF-{number:05d}"
 
 
+def parse_classified_id(value: str) -> str | None:
+    """Extract and normalize a Dwarfy Classifieds ID."""
+    match = CLASSIFIED_ID_RE.search(value.strip().strip("`"))
+    if match is None:
+        return None
+    number = int(match.group(1))
+    return f"DWC-{number:05d}"
+
+
 def _valid_listing_id(value: str) -> bool:
     return parse_listing_id(value) is not None
 
@@ -145,12 +158,57 @@ def listing_display_name(listing: dict[str, Any]) -> str:
     )
 
 
+def classified_display_name(classified: dict[str, Any]) -> str:
+    """Use the classified display name, falling back to base item names."""
+    return (
+        classified.get("listing_display_name")
+        or classified.get("item_name")
+        or classified.get("item_clean_name")
+        or "Unknown item"
+    )
+
+
 def source_with_page(source: str | None, page: str | None) -> str:
     if source and page:
         clean_page = page.strip()
         page_text = clean_page if clean_page.casefold().startswith("p") else f"p. {clean_page}"
         return f"{source}, {page_text}"
     return source or "Unknown"
+
+
+def parse_utc_datetime(value: str | None) -> datetime | None:
+    """Parse the SQLite UTC timestamp format used by Dwarfy."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def age_text(value: str | None) -> str:
+    """Return a compact human-readable age for a stored UTC timestamp."""
+    parsed = parse_utc_datetime(value)
+    if parsed is None:
+        return "unknown"
+    seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def rarity_color(rarity: str | None) -> discord.Color:
+    return discord.Color(RARITY_COLORS.get(rarity or "", 0xC9A227))
 
 
 def broker_sale_result_line(sale: Any) -> str:
@@ -286,11 +344,16 @@ def build_browse_embed(
     for listing, low, high in page_entries:
         display_name = listing_display_name(listing)
         origin = listing_origin_text(listing)
+        age_label = "Stocked" if listing.get("stock_source") == "owner_stock" else "Listed"
+        age_line = f"{age_label}: {age_text(listing.get('created_at'))}"
+        if listing.get("stock_batch_id"):
+            age_line += f" | Batch: {listing['stock_batch_id']}"
         field_name = truncate_text(f"{listing['listing_id']} - {display_name}", 256)
         field_value = (
             f"{listing['rarity']} | {listing.get('source') or 'Unknown'} | "
             f"Price on buy: {price_range_text(low, high)}\n"
-            f"Origin: {origin}"
+            f"Origin: {origin}\n"
+            f"{age_line}"
         )
         embed.add_field(
             name=field_name,
@@ -406,6 +469,150 @@ class BrowseView(discord.ui.View):
             build_browse_output(self.listings_with_prices, cap=self.cap),
             ephemeral=True,
         )
+
+
+def listing_rules_text(listing: dict[str, Any]) -> str:
+    """Return private item rules/details text for inspect."""
+    lines = [
+        f"{listing_display_name(listing)}",
+        f"Rarity: {listing.get('rarity') or 'Unknown'}",
+        f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
+    ]
+    if listing.get("display_detail"):
+        lines.append(f"Detail: {listing['display_detail']}")
+    if listing.get("short_description"):
+        lines.extend(["", listing["short_description"]])
+    if listing.get("rules_text"):
+        lines.extend(["", "Rules Text:", listing["rules_text"]])
+    if listing.get("json_notes"):
+        lines.extend(["", f"JSON Notes: {listing['json_notes']}"])
+    if listing.get("variant_instructions"):
+        lines.extend(["", f"Variant instructions: {listing['variant_instructions']}"])
+    return "\n".join(lines)
+
+
+def listing_receipt_text(listing: dict[str, Any]) -> str:
+    """Return stored receipt text for inspect buttons."""
+    receipt = listing.get("buy_receipt_text") or listing.get("adventure_log_receipt") or listing.get("receipt_text")
+    if receipt:
+        return receipt
+    return f"No stored receipt text found for {listing.get('listing_id', 'this listing')}."
+
+
+def build_inspect_embed(listing: dict[str, Any]) -> discord.Embed:
+    """Build the polished private listing inspect card."""
+    display_name = listing_display_name(listing)
+    low, high = possible_final_price_range(listing["rarity"], int(listing["cost_basis"]))
+    status = listing.get("status") or "unknown"
+    item_status = listing.get("item_status") or ("inventory" if status == "available" else status)
+    embed = discord.Embed(
+        title=display_name,
+        description=listing.get("short_description") or listing.get("display_detail") or "",
+        color=rarity_color(listing.get("rarity")),
+    )
+    embed.add_field(name="Listing", value=listing["listing_id"], inline=True)
+    embed.add_field(name="Rarity", value=listing.get("rarity") or "Unknown", inline=True)
+    embed.add_field(name="Price on Buy", value=price_range_text(low, high), inline=True)
+    embed.add_field(name="Source", value=source_with_page(listing.get("source"), listing.get("page")), inline=True)
+    embed.add_field(name="Origin", value=truncate_text(listing_origin_text(listing), 1024), inline=False)
+    embed.add_field(name="Status", value=f"{status} / {item_status}", inline=True)
+    embed.add_field(name="Sale Method", value=listing.get("sale_method") or "unknown/legacy", inline=True)
+    embed.add_field(name="Cost Basis", value=gp(int(listing.get("cost_basis") or 0)), inline=True)
+    if listing.get("variant") or listing.get("variant_details"):
+        embed.add_field(name="Variant", value=listing.get("variant") or listing.get("variant_details"), inline=True)
+    if listing.get("details"):
+        embed.add_field(name="Notes", value=truncate_text(listing["details"], 1024), inline=False)
+    if listing.get("stock_source") == "owner_stock":
+        embed.add_field(name="Stock Age", value=age_text(listing.get("created_at")), inline=True)
+        embed.add_field(name="Batch", value=listing.get("stock_batch_id") or "none", inline=True)
+    if status == "sold":
+        buyer = mention_user(listing.get("buyer_user_id"), listing.get("buyer_display_name"))
+        buyer_character = character_label(listing.get("buyer_character_name"), listing.get("buyer_character_level"))
+        embed.add_field(name="Buyer", value=f"{buyer} as {buyer_character}", inline=False)
+        embed.add_field(name="Final Sale", value=gp(int(listing.get("final_sale_price") or 0)), inline=True)
+        embed.add_field(name="Profit", value=gp(int(listing.get("realized_profit") or 0)), inline=True)
+    if listing.get("debt_total"):
+        embed.add_field(
+            name="Debt Consequence",
+            value=f"{gp(int(listing.get('debt_total') or 0))} ({listing.get('debt_status') or 'unpaid'})",
+            inline=False,
+        )
+    embed.set_footer(text=f"Stocked {age_text(listing.get('created_at'))}")
+    return embed
+
+
+class BuyListingModal(discord.ui.Modal, title="Buy Dwarfy Listing"):
+    """Modal opened by the inspect Buy button."""
+
+    def __init__(self, cog: Any, listing_id: str) -> None:
+        super().__init__()
+        self.cog = cog
+        self.listing_id = listing_id
+        self.character = discord.ui.TextInput(label="Character name", max_length=100)
+        self.level = discord.ui.TextInput(label="Character level", placeholder="1-20", max_length=2)
+        self.gold = discord.ui.TextInput(label="Gold available", placeholder="0", max_length=10)
+        self.add_item(self.character)
+        self.add_item(self.level)
+        self.add_item(self.gold)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            level = int(str(self.level.value).strip())
+            gold = int(str(self.gold.value).strip())
+        except ValueError:
+            await interaction.response.send_message("Level and gold must be whole numbers.", ephemeral=True)
+            return
+        if not 1 <= level <= 20:
+            await interaction.response.send_message("Level must be between 1 and 20.", ephemeral=True)
+            return
+        if not 0 <= gold <= 10_000_000:
+            await interaction.response.send_message("Gold must be between 0 and 10,000,000gp.", ephemeral=True)
+            return
+        await self.cog._buy_listing_from_id(
+            interaction,
+            listing_id=self.listing_id,
+            character=str(self.character.value).strip(),
+            level=level,
+            gold=gold,
+        )
+
+
+class InspectView(discord.ui.View):
+    """Private controls for inspecting a single listing."""
+
+    def __init__(self, cog: Any, listing: dict[str, Any], *, owner_id: int) -> None:
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.listing = listing
+        self.owner_id = owner_id
+        if listing.get("status") != "available" or (listing.get("item_status") or "inventory") != "inventory":
+            button = self.button_by_id("dwarfy_inspect_buy")
+            if button is not None:
+                button.disabled = True
+
+    def button_by_id(self, custom_id: str) -> discord.ui.Button | None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id == custom_id:
+                return child
+        return None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("This inspect card belongs to the person who opened it.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Show Rules", style=discord.ButtonStyle.secondary, custom_id="dwarfy_inspect_rules")
+    async def show_rules(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await send_text_response(interaction, listing_rules_text(self.listing), ephemeral=True)
+
+    @discord.ui.button(label="Show Receipt", style=discord.ButtonStyle.secondary, custom_id="dwarfy_inspect_receipt")
+    async def show_receipt(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await send_text_response(interaction, listing_receipt_text(self.listing), ephemeral=True)
+
+    @discord.ui.button(label="Buy This", style=discord.ButtonStyle.primary, custom_id="dwarfy_inspect_buy")
+    async def buy_this(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(BuyListingModal(self.cog, self.listing["listing_id"]))
 
 
 def new_stock_batch_id() -> str:
@@ -712,6 +919,86 @@ def build_sell_receipt(
     if variant_instructions and not variant:
         lines.append(f"Variant instructions: {variant_instructions}")
     return "\n".join(lines)
+
+
+def classified_fee_for_price(asking_price: int) -> int:
+    """Dwarfy's classifieds broker fee, paid by the buyer."""
+    return (asking_price * CLASSIFIED_FEE_PERCENT) // 100
+
+
+def build_classified_embed(classified: dict[str, Any]) -> discord.Embed:
+    """Build a private/public classified item card."""
+    name = classified_display_name(classified)
+    embed = discord.Embed(
+        title=f"{classified['classified_id']} - {name}",
+        description=classified.get("short_description") or classified.get("display_detail") or "",
+        color=rarity_color(classified.get("rarity")),
+    )
+    seller = mention_user(classified.get("seller_user_id"), classified.get("seller_display_name"))
+    seller_character = character_label(
+        classified.get("seller_character_name"),
+        classified.get("seller_character_level"),
+    )
+    embed.add_field(name="Rarity", value=classified.get("rarity") or "Unknown", inline=True)
+    embed.add_field(name="Source", value=source_with_page(classified.get("source"), classified.get("page")), inline=True)
+    embed.add_field(name="Status", value=classified.get("status") or "unknown", inline=True)
+    embed.add_field(name="Seller", value=f"{seller} as {seller_character}", inline=False)
+    embed.add_field(name="Seller Receives", value=gp(int(classified.get("asking_price") or 0)), inline=True)
+    embed.add_field(name="Dwarfy Fee", value=gp(int(classified.get("broker_fee") or 0)), inline=True)
+    embed.add_field(name="Buyer Total", value=gp(int(classified.get("buyer_total") or 0)), inline=True)
+    if classified.get("variant"):
+        embed.add_field(name="Variant", value=classified["variant"], inline=True)
+    if classified.get("details"):
+        embed.add_field(name="Notes", value=truncate_text(classified["details"], 1024), inline=False)
+    embed.set_footer(text=f"Posted {age_text(classified.get('created_at'))}")
+    return embed
+
+
+def build_classified_browse_output(classifieds: list[dict[str, Any]]) -> str:
+    """Build copyable classifieds browse text."""
+    lines = [f"Dwarfy's Classifieds has {len(classifieds)} open posting{'s' if len(classifieds) != 1 else ''}:", ""]
+    for classified in classifieds:
+        lines.extend(
+            [
+                f"{classified['classified_id']} - {classified_display_name(classified)} - {classified['rarity']}",
+                (
+                    f"Seller receives: {gp(int(classified['asking_price']))} | "
+                    f"Dwarfy fee: {gp(int(classified['broker_fee']))} | "
+                    f"Buyer total: {gp(int(classified['buyer_total']))}"
+                ),
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def build_classified_trade_log(
+    classified: dict[str, Any],
+    *,
+    buyer: str,
+    buyer_character: str,
+) -> str:
+    """Build the copyable trade-log text for a classified sale."""
+    seller = mention_user(classified.get("seller_user_id"), classified.get("seller_display_name"))
+    seller_character = character_label(
+        classified.get("seller_character_name"),
+        classified.get("seller_character_level"),
+    )
+    item_name = classified_display_name(classified)
+    return (
+        "Dwarfy Classifieds Trade Log\n\n"
+        f"Buyer post:\n"
+        f"{buyer} as {buyer_character} pays {gp(int(classified['buyer_total']))} total for {item_name}:\n"
+        f"* {gp(int(classified['asking_price']))} to {seller} as {seller_character}\n"
+        f"* {gp(int(classified['broker_fee']))} to Dwarfy's Shop as a classifieds broker fee\n\n"
+        f"Seller post:\n"
+        f"{seller} as {seller_character} receives {gp(int(classified['asking_price']))} "
+        f"from {buyer} as {buyer_character} for {item_name}.\n\n"
+        f"Dwarfy fee record:\n"
+        f"Dwarfy's Shop receives {gp(int(classified['broker_fee']))} from {buyer} as {buyer_character} "
+        f"for brokering {item_name}.\n\n"
+        "Trade status: Final once both players update their logs."
+    )
 
 
 class Dwarfy(commands.GroupCog, name="dwarfy"):
@@ -1070,6 +1357,95 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             "listing_name": resolved_listing_name(sheet_item.name, variant_clean),
         }
 
+    async def _resolve_classified_context(
+        self,
+        interaction: discord.Interaction,
+        *,
+        item: str,
+        variant: str | None,
+        details: str | None,
+    ) -> dict[str, Any] | None:
+        """Validate a player-posted classified item."""
+        if not await self._require_channel(
+            interaction,
+            self.bot.config.dwarfy_shop_channel_id,
+            "DWARFY_SHOP_CHANNEL_ID",
+        ):
+            return None
+        if not await self._require_sheet_cache(interaction):
+            return None
+        if looks_like_pasted_item_text(item):
+            await interaction.response.send_message(
+                "Use only the clean item name in the item field. The bot already knows the item data.",
+                ephemeral=True,
+            )
+            return None
+
+        match = self.bot.sheet_cache.match_item(item, for_sell=False)
+        if match.choices:
+            await interaction.response.send_message(
+                f"{match.message or 'I found multiple possible item matches.'} Please run the command again with one exact item name:\n"
+                f"{format_item_choices(match.choices)}",
+                ephemeral=True,
+            )
+            return None
+        if match.item is None:
+            await interaction.response.send_message(
+                match.message or f"I could not find `{item}` in the cached Bot Items sheet.",
+                ephemeral=True,
+            )
+            return None
+
+        sheet_item = match.item
+        if not sheet_item.allowed:
+            await interaction.response.send_message(
+                f"`{sheet_item.name}` is Allowed=FALSE and cannot be posted to Dwarfy's Classifieds.",
+                ephemeral=True,
+            )
+            return None
+        if sheet_item.loot_type != "Item":
+            await interaction.response.send_message(
+                f"`{sheet_item.name}` is Loot Type={sheet_item.loot_type}; classifieds can only post actual items.",
+                ephemeral=True,
+            )
+            return None
+        if not is_supported_rarity(sheet_item.rarity):
+            await interaction.response.send_message(
+                f"Dwarfy cannot classify `{sheet_item.rarity}` items in version 1.",
+                ephemeral=True,
+            )
+            return None
+
+        variant_clean = (variant or "").strip() or None
+        details_clean = (details or "").strip() or None
+        is_template = is_generic_template_item(sheet_item)
+        if variant_clean and not is_template:
+            await interaction.response.send_message(
+                "Variant is only used for generic/template items. This item is already specific.",
+                ephemeral=True,
+            )
+            return None
+        if details_clean and not is_template and looks_like_pasted_detail_text(details_clean):
+            await interaction.response.send_message(
+                "Use details only for short custom trade notes, not full item rules text.",
+                ephemeral=True,
+            )
+            return None
+
+        variant_note = ""
+        if variant_clean and sheet_item.variant_option_list:
+            option_names = {option.casefold() for option in sheet_item.variant_option_list}
+            if variant_clean.casefold() not in option_names:
+                variant_note = "Variant note: This variant was not in the sheet's suggested options."
+
+        return {
+            "sheet_item": sheet_item,
+            "variant_clean": variant_clean,
+            "details_clean": details_clean,
+            "listing_name": resolved_listing_name(sheet_item.name, variant_clean),
+            "variant_note": variant_note,
+        }
+
     async def _create_owner_stock_listing(
         self,
         interaction: discord.Interaction,
@@ -1339,8 +1715,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         created: list[dict[str, Any]] = []
         audit_lines: list[str] = []
         selected_permanent_names: set[str] = set()
+        rarity_counts: dict[str, int] = {}
+        type_counts = {"Permanent": 0, "Consumable": 0}
+        total_cost_basis = 0
 
         async def add_random_slot(index: int, *, consumable: bool) -> None:
+            nonlocal total_cost_basis
             d100 = random.randint(1, 100)
             rolled_rarity = stock_rarity_from_roll(d100, consumable=consumable)
             selected_rarity, pool = stock_item_pool(
@@ -1384,6 +1764,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 batch_id=batch_id,
             )
             created.append(row)
+            rarity_counts[sheet_item.rarity] = rarity_counts.get(sheet_item.rarity, 0) + 1
+            type_counts["Consumable" if consumable else "Permanent"] += 1
+            total_cost_basis += cost_basis
             fallback_text = "" if selected_rarity == rolled_rarity else f", fallback to {selected_rarity}"
             slot_type = "Consumable" if consumable else "Permanent"
             audit_lines.append(
@@ -1406,7 +1789,26 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"APL filter: {int(apl)}",
             f"Tag preference: {tag.strip() if tag else 'none'}",
             f"Listings created: {len(created)}",
+            f"Permanent / Consumable: {type_counts['Permanent']} / {type_counts['Consumable']}",
+            f"Total cost basis added: {gp(total_cost_basis)}",
+            "Rarity breakdown: "
+            + (
+                ", ".join(f"{rarity}: {rarity_counts[rarity]}" for rarity in RARITY_ORDER if rarity_counts.get(rarity))
+                if rarity_counts
+                else "none"
+            ),
         ]
+        notable = sorted(
+            created,
+            key=lambda row: (RARITY_ORDER.index(row["rarity"]) if row["rarity"] in RARITY_ORDER else -1, int(row["cost_basis"])),
+            reverse=True,
+        )[:5]
+        if notable:
+            lines.extend(["", "Notable stock:"])
+            lines.extend(
+                f"* {row['listing_id']} - {listing_display_name(row)} ({row['rarity']})"
+                for row in notable
+            )
         if clear_first:
             lines.extend(
                 [
@@ -1791,7 +2193,11 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
 
-        await send_text_response(interaction, self._format_inspect(row), ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_inspect_embed(row),
+            view=InspectView(self, row, owner_id=interaction.user.id),
+            ephemeral=True,
+        )
 
     def _format_inspect(self, listing: dict[str, Any]) -> str:
         display_name = listing_display_name(listing)
@@ -1902,35 +2308,57 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         return "\n".join(lines)
 
-    @app_commands.command(name="buy", description="Buy an available magic item from Dwarfy.")
-    @app_commands.describe(
-        listing="Listing ID only, such as DWF-00017.",
-        character="Your character's name.",
-        level="Your character's level.",
-        gold="How much gold this character currently has available.",
-    )
-    async def buy(
+    async def _post_debt_log(
+        self,
+        *,
+        buyer: str,
+        buyer_character: str,
+        item_name: str,
+        listing_id: str,
+        debt_owed: int,
+        debt_fine: int,
+        debt_total: int,
+    ) -> None:
+        """Post a debt consequence to the configured unresolved-log channel."""
+        channel_id = self.bot.config.death_unresolved_log_channel_id
+        if channel_id is None:
+            return
+        try:
+            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+            await channel.send(
+                (
+                    f"{buyer} as {buyer_character} was permanently affected by defaulting on a "
+                    "Dwarfy's Shop magic item contract.\n\n"
+                    "Outcome: jailed debt consequence.\n"
+                    "Status: unresolved.\n"
+                    "DTP Required: no.\n"
+                    f"Notes: Listing {listing_id} for {item_name}. "
+                    f"Price shortfall {gp(debt_owed)} + contract-default fine {gp(debt_fine)} "
+                    f"= {gp(debt_total)} total. Character is unplayable until resolved. "
+                    "The item remains theirs but cannot be sold or traded until the debt is paid."
+                )
+            )
+            await self.bot.db.add_ledger_entry(
+                entry_type="debt_logged",
+                listing_id=listing_id,
+                item_name=item_name,
+                cash_change=0,
+                inventory_cost_change=0,
+                profit_change=0,
+                notes=f"Posted unresolved debt log for {buyer_character}: {gp(debt_total)}.",
+            )
+        except Exception as exc:
+            print(f"[dwarfy] Could not post debt log for {listing_id}: {exc}")
+
+    async def _buy_listing_from_id(
         self,
         interaction: discord.Interaction,
-        listing: str,
+        *,
+        listing_id: str,
         character: str,
-        level: app_commands.Range[int, 1, 20],
-        gold: app_commands.Range[int, 0, 10_000_000],
+        level: int,
+        gold: int,
     ) -> None:
-        if not await self._require_channel(
-            interaction,
-            self.bot.config.dwarfy_shop_channel_id,
-            "DWARFY_SHOP_CHANNEL_ID",
-        ):
-            return
-        listing_id = parse_listing_id(listing)
-        if listing_id is None:
-            await interaction.response.send_message(
-                "Please buy by listing ID only, like `DWF-00017`.",
-                ephemeral=True,
-            )
-            return
-
         row = await self.bot.db.get_listing(listing_id)
         if row is None:
             await interaction.response.send_message(
@@ -1950,7 +2378,18 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return
+        await self._finish_buy(interaction, row=row, character=character, level=level, gold=gold)
 
+    async def _finish_buy(
+        self,
+        interaction: discord.Interaction,
+        *,
+        row: dict[str, Any],
+        character: str,
+        level: int,
+        gold: int,
+    ) -> None:
+        """Finalize a Dwarfy-owned inventory purchase."""
         buy_roll = roll_buy_price(row["rarity"], int(row["cost_basis"]))
         item_name = listing_display_name(row)
         gold_available = int(gold)
@@ -2014,6 +2453,15 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 "Dwarfy already owned the item, prepared the sale, signed the shop ledger, "
                 "and the collectors are painfully punctual."
             )
+            await self._post_debt_log(
+                buyer=buyer,
+                buyer_character=buyer_character,
+                item_name=item_name,
+                listing_id=row["listing_id"],
+                debt_owed=debt_owed,
+                debt_fine=debt_fine,
+                debt_total=debt_total,
+            )
         if debt_total:
             payment_lines = (
                 f"{buyer} as {buyer_character} cannot cover the {gp(buy_roll.final_price)} final price for {item_name}.\n"
@@ -2034,6 +2482,42 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             "Record this downtime activity manually on the character's adventure log."
         )
         await send_text_response(interaction, output)
+
+    @app_commands.command(name="buy", description="Buy an available magic item from Dwarfy.")
+    @app_commands.describe(
+        listing="Listing ID only, such as DWF-00017.",
+        character="Your character's name.",
+        level="Your character's level.",
+        gold="How much gold this character currently has available.",
+    )
+    async def buy(
+        self,
+        interaction: discord.Interaction,
+        listing: str,
+        character: str,
+        level: app_commands.Range[int, 1, 20],
+        gold: app_commands.Range[int, 0, 10_000_000],
+    ) -> None:
+        if not await self._require_channel(
+            interaction,
+            self.bot.config.dwarfy_shop_channel_id,
+            "DWARFY_SHOP_CHANNEL_ID",
+        ):
+            return
+        listing_id = parse_listing_id(listing)
+        if listing_id is None:
+            await interaction.response.send_message(
+                "Please buy by listing ID only, like `DWF-00017`.",
+                ephemeral=True,
+            )
+            return
+        await self._buy_listing_from_id(
+            interaction,
+            listing_id=listing_id,
+            character=character,
+            level=int(level),
+            gold=int(gold),
+        )
 
     @buy.autocomplete("listing")
     async def buy_listing_autocomplete(
@@ -2056,6 +2540,345 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 break
         return choices
 
+    @app_commands.command(name="classified_post", description="Post a player-to-player magic item sale through Dwarfy.")
+    @app_commands.describe(
+        character="Your character's name.",
+        level="Your character's level.",
+        item="Clean item name from Bot Items.",
+        price="Gold the seller receives if another player buys it.",
+        variant="Optional identity for generic/template items, such as Longsword.",
+        details="Optional trade notes, not full item rules text.",
+    )
+    async def classified_post(
+        self,
+        interaction: discord.Interaction,
+        character: str,
+        level: app_commands.Range[int, 1, 20],
+        item: str,
+        price: app_commands.Range[int, 1, 100_000_000],
+        variant: str | None = None,
+        details: str | None = None,
+    ) -> None:
+        context = await self._resolve_classified_context(
+            interaction,
+            item=item,
+            variant=variant,
+            details=details,
+        )
+        if context is None:
+            return
+
+        sheet_item = context["sheet_item"]
+        asking_price = int(price)
+        broker_fee = classified_fee_for_price(asking_price)
+        buyer_total = asking_price + broker_fee
+        row = await self.bot.db.create_classified(
+            item_name=context["listing_name"],
+            item_clean_name=sheet_item.name,
+            listing_display_name=context["listing_name"],
+            base_item_name=sheet_item.name if context["variant_clean"] else None,
+            variant=context["variant_clean"],
+            details=context["details_clean"],
+            rarity=sheet_item.rarity,
+            source=sheet_item.source,
+            category=sheet_item.category,
+            tags=sheet_item.tags_text,
+            variant_type=sheet_item.variant_type or None,
+            variant_instructions=sheet_item.variant_instructions or None,
+            item_type=sheet_item.item_type or None,
+            attunement=sheet_item.attunement or None,
+            page=sheet_item.page or None,
+            display_detail=sheet_item.display_detail or None,
+            short_description=sheet_item.short_description or None,
+            rules_text=sheet_item.rules_text or None,
+            json_notes=sheet_item.json_notes or None,
+            item_tags=sheet_item.item_tags or None,
+            seller_user_id=str(interaction.user.id),
+            seller_display_name=_display_name(interaction.user),
+            seller_character_name=character.strip(),
+            seller_character_level=int(level),
+            asking_price=asking_price,
+            broker_fee=broker_fee,
+            buyer_total=buyer_total,
+        )
+
+        lines = [
+            f"{interaction.user.mention} posts {classified_display_name(row)} on Dwarfy's Classifieds.",
+            "",
+            "Dwarfy Classifieds Posting:",
+            f"Posting: {row['classified_id']}",
+            f"Seller: {interaction.user.mention} as {character_label(character, int(level))}",
+            f"Item: {classified_display_name(row)}",
+            f"Rarity: {sheet_item.rarity}",
+            f"Source: {source_with_page(sheet_item.source, sheet_item.page)}",
+            f"Seller receives: {gp(asking_price)}",
+            f"Dwarfy broker fee: {gp(broker_fee)} ({CLASSIFIED_FEE_PERCENT}%, paid by the buyer)",
+            f"Buyer total: {gp(buyer_total)}",
+            "Status: Open",
+        ]
+        if context["variant_note"]:
+            lines.append(context["variant_note"])
+        if context["details_clean"]:
+            lines.append(f"Notes: {context['details_clean']}")
+        if sheet_item.variant_instructions and not context["variant_clean"]:
+            lines.append(f"Variant instructions: {sheet_item.variant_instructions}")
+        lines.extend(
+            [
+                "",
+                "A buyer can run `/dwarfy classified_buy` with the posting ID to generate the trade-log text.",
+            ]
+        )
+        await send_text_response(interaction, "\n".join(lines))
+
+    @classified_post.autocomplete("item")
+    async def classified_post_item_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not self.bot.sheet_cache.loaded:
+            return []
+        return [
+            app_commands.Choice(name=name[:100], value=name[:100])
+            for name in self._stock_item_autocomplete_names(current)
+        ]
+
+    @classified_post.autocomplete("variant")
+    async def classified_post_variant_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not self.bot.sheet_cache.loaded:
+            return []
+        item_name = getattr(interaction.namespace, "item", "") or ""
+        return [
+            app_commands.Choice(name=name[:100], value=name[:100])
+            for name in self._stock_variant_options(item_name, current)
+        ]
+
+    @app_commands.command(name="classified_browse", description="Privately browse open Dwarfy Classifieds postings.")
+    @app_commands.describe(
+        rarity="Optional rarity filter.",
+        search="Search item name, seller, source, category, tags, or notes.",
+    )
+    @app_commands.choices(rarity=BROWSE_RARITY_CHOICES)
+    async def classified_browse(
+        self,
+        interaction: discord.Interaction,
+        rarity: str | None = None,
+        search: str | None = None,
+    ) -> None:
+        if not await self._require_channel(
+            interaction,
+            self.bot.config.dwarfy_shop_channel_id,
+            "DWARFY_SHOP_CHANNEL_ID",
+        ):
+            return
+        rarity_filter = normalize_rarity(rarity) if rarity else None
+        if rarity_filter and rarity_filter not in BROWSE_RARITY_VALUES:
+            await interaction.response.send_message(
+                "Choose one of the supported rarity filters: Common, Uncommon, Rare, Very Rare, or Legendary.",
+                ephemeral=True,
+            )
+            return
+        search_filter = search.casefold().strip() if search else None
+        rows = await self.bot.db.list_open_classifieds()
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            if rarity_filter and row["rarity"] != rarity_filter:
+                continue
+            searchable = " ".join(
+                str(row.get(field) or "")
+                for field in (
+                    "classified_id",
+                    "listing_display_name",
+                    "item_name",
+                    "item_clean_name",
+                    "source",
+                    "category",
+                    "tags",
+                    "seller_display_name",
+                    "seller_character_name",
+                    "details",
+                )
+            ).casefold()
+            if search_filter and search_filter not in searchable:
+                continue
+            filtered.append(row)
+
+        if not filtered:
+            await interaction.response.send_message(
+                "Dwarfy's Classifieds has no open postings matching those filters.",
+                ephemeral=True,
+            )
+            return
+        await send_text_response(interaction, build_classified_browse_output(filtered), ephemeral=True)
+
+    @app_commands.command(name="classified_inspect", description="Privately inspect one Dwarfy Classifieds posting.")
+    @app_commands.describe(classified="Classified ID, such as DWC-00017.")
+    async def classified_inspect(self, interaction: discord.Interaction, classified: str) -> None:
+        if not await self._require_channel(
+            interaction,
+            self.bot.config.dwarfy_shop_channel_id,
+            "DWARFY_SHOP_CHANNEL_ID",
+        ):
+            return
+        classified_id = parse_classified_id(classified)
+        if classified_id is None:
+            await interaction.response.send_message(
+                "Please inspect by classified ID, like `DWC-00017`.",
+                ephemeral=True,
+            )
+            return
+        row = await self.bot.db.get_classified(classified_id)
+        if row is None:
+            await interaction.response.send_message(
+                f"I could not find classified posting `{classified_id}`.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(embed=build_classified_embed(row), ephemeral=True)
+
+    @app_commands.command(name="classified_buy", description="Buy a player-posted item from Dwarfy's Classifieds.")
+    @app_commands.describe(
+        classified="Classified ID, such as DWC-00017.",
+        character="Your character's name.",
+        level="Your character's level.",
+    )
+    async def classified_buy(
+        self,
+        interaction: discord.Interaction,
+        classified: str,
+        character: str,
+        level: app_commands.Range[int, 1, 20],
+    ) -> None:
+        if not await self._require_channel(
+            interaction,
+            self.bot.config.dwarfy_shop_channel_id,
+            "DWARFY_SHOP_CHANNEL_ID",
+        ):
+            return
+        classified_id = parse_classified_id(classified)
+        if classified_id is None:
+            await interaction.response.send_message(
+                "Please buy by classified ID, like `DWC-00017`.",
+                ephemeral=True,
+            )
+            return
+        row = await self.bot.db.get_classified(classified_id)
+        if row is None:
+            await interaction.response.send_message(
+                f"I could not find classified posting `{classified_id}`.",
+                ephemeral=True,
+            )
+            return
+        if row["status"] != "open":
+            await interaction.response.send_message(
+                f"`{row['classified_id']}` is already {row['status']} and cannot be bought.",
+                ephemeral=True,
+            )
+            return
+        buyer = interaction.user.mention
+        buyer_character = character_label(character, int(level))
+        trade_log = build_classified_trade_log(row, buyer=buyer, buyer_character=buyer_character)
+        sold = await self.bot.db.mark_classified_sold(
+            classified_id=row["classified_id"],
+            buyer_user_id=str(interaction.user.id),
+            buyer_display_name=_display_name(interaction.user),
+            buyer_character_name=character.strip(),
+            buyer_character_level=int(level),
+            trade_log_text=trade_log,
+        )
+        if not sold:
+            await interaction.response.send_message(
+                "That classified posting is no longer open. Please browse again.",
+                ephemeral=True,
+            )
+            return
+
+        output = (
+            f"{buyer} buys {classified_display_name(row)} through Dwarfy's Classifieds.\n\n"
+            "Dwarfy Classifieds Receipt:\n"
+            f"Posting: {row['classified_id']}\n"
+            f"Item: {classified_display_name(row)}\n"
+            f"Rarity: {row['rarity']}\n"
+            f"Source: {source_with_page(row.get('source'), row.get('page'))}\n"
+            f"Seller receives: {gp(int(row['asking_price']))}\n"
+            f"Dwarfy broker fee: {gp(int(row['broker_fee']))}\n"
+            f"Buyer total: {gp(int(row['buyer_total']))}\n"
+            "Status: Final once both players update their logs.\n\n"
+            "Copyable Trade Log:\n"
+            f"{trade_log}"
+        )
+        await send_text_response(interaction, output)
+
+    async def _classified_id_choices(
+        self,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        query = current.casefold().strip()
+        rows = await self.bot.db.list_open_classifieds()
+        choices: list[app_commands.Choice[str]] = []
+        for row in rows:
+            display_name = classified_display_name(row)
+            label = f"{row['classified_id']} - {display_name} ({gp(int(row['buyer_total']))})"
+            searchable = f"{row['classified_id']} {display_name} {row['rarity']} {row.get('seller_display_name')}".casefold()
+            if query and query not in searchable:
+                continue
+            choices.append(app_commands.Choice(name=label[:100], value=row["classified_id"]))
+            if len(choices) >= 25:
+                break
+        return choices
+
+    @classified_inspect.autocomplete("classified")
+    async def classified_inspect_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return await self._classified_id_choices(current)
+
+    @classified_buy.autocomplete("classified")
+    async def classified_buy_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return await self._classified_id_choices(current)
+
+    @app_commands.command(name="classified_void", description="Admin/mod: void a Dwarfy Classifieds posting.")
+    @app_commands.describe(
+        classified="Classified ID, such as DWC-00017.",
+        reason="Why this posting is being voided.",
+    )
+    async def classified_void(self, interaction: discord.Interaction, classified: str, reason: str) -> None:
+        if not await self._require_admin(interaction):
+            return
+        classified_id = parse_classified_id(classified)
+        if classified_id is None:
+            await interaction.response.send_message("Use a classified ID like `DWC-00017`.", ephemeral=True)
+            return
+        row = await self.bot.db.void_classified(classified_id, reason)
+        if row is None:
+            await interaction.response.send_message(
+                f"I could not find classified posting `{classified_id}` to void.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"Dwarfy classified voided: {row['classified_id']} - {classified_display_name(row)}\nReason: {reason}",
+            ephemeral=True,
+        )
+
+    @classified_void.autocomplete("classified")
+    async def classified_void_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return await self._classified_id_choices(current)
+
     @app_commands.command(name="stats", description="Show Dwarfy's inventory and ledger stats.")
     async def stats(self, interaction: discord.Interaction) -> None:
         if not await self._require_admin(interaction):
@@ -2064,23 +2887,189 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         stats = await self.bot.db.shop_stats()
         best = stats["most_profitable_flip"]
         best_text = (
-            f"{best['listing_id']} \u2014 {best['item_name']} \u2014 {gp(int(best['realized_profit']))}"
+            f"{best['listing_id']} - {best['item_name']} - {gp(int(best['realized_profit']))}"
             if best
             else "none"
         )
-        output = (
-            "Dwarfy's Shop stats\n\n"
-            f"* Available inventory count: {stats['available_count']}\n"
-            f"* Sold listing count: {stats['sold_count']}\n"
-            f"* Voided listing count: {stats['voided_count']}\n"
-            f"* Total paid to sellers: {gp(stats['total_paid_to_sellers'])}\n"
-            f"* Total received from buyers: {gp(stats['total_received_from_buyers'])}\n"
-            f"* Realized profit from completed flips: {gp(stats['realized_profit'])}\n"
-            f"* Available inventory cost basis: {gp(stats['available_inventory_cost_basis'])}\n"
-            f"* Business cash flow from magic-item transactions: {gp(stats['business_cash_flow'])}\n"
-            f"* Most profitable completed flip: {best_text}"
+        expensive = stats.get("most_expensive_available_item")
+        expensive_text = (
+            f"{expensive['listing_id']} - {expensive['item_name']} - {gp(int(expensive['cost_basis']))}"
+            if expensive
+            else "none"
         )
-        await send_text_response(interaction, output, ephemeral=True)
+        oldest = stats.get("oldest_unsold_item")
+        oldest_text = (
+            f"{oldest['listing_id']} - {oldest['item_name']} - stocked {age_text(oldest['created_at'])}"
+            if oldest
+            else "none"
+        )
+        top_seller = stats.get("top_seller")
+        top_seller_text = (
+            f"{top_seller['seller_display_name']} - {top_seller['count']} item(s), {gp(int(top_seller['total']))} paid"
+            if top_seller
+            else "none"
+        )
+        top_buyer = stats.get("top_buyer")
+        top_buyer_text = (
+            f"{top_buyer['buyer_display_name']} - {top_buyer['count']} item(s), {gp(int(top_buyer['total']))} spent"
+            if top_buyer
+            else "none"
+        )
+        embed = discord.Embed(
+            title="Dwarfy's Shop Dashboard",
+            color=discord.Color(0xC9A227),
+        )
+        embed.add_field(
+            name="Inventory",
+            value=(
+                f"Available: {stats['available_count']}\n"
+                f"Owner stock: {stats['owner_stock_available_count']}\n"
+                f"Player stock: {stats['player_stock_available_count']}\n"
+                f"Available cost basis: {gp(stats['available_inventory_cost_basis'])}"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Transactions",
+            value=(
+                f"Sold: {stats['sold_count']}\n"
+                f"Voided: {stats['voided_count']}\n"
+                f"Paid to sellers: {gp(stats['total_paid_to_sellers'])}\n"
+                f"Received from buyers: {gp(stats['total_received_from_buyers'])}"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Profit",
+            value=(
+                f"Realized profit: {gp(stats['realized_profit'])}\n"
+                f"Business cash flow: {gp(stats['business_cash_flow'])}\n"
+                f"Best flip: {best_text}"
+            ),
+            inline=False,
+        )
+        embed.add_field(name="Most Expensive Available", value=expensive_text, inline=False)
+        embed.add_field(name="Oldest Unsold", value=oldest_text, inline=False)
+        embed.add_field(name="Top Seller", value=top_seller_text, inline=True)
+        embed.add_field(name="Top Buyer", value=top_buyer_text, inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="history", description="Admin/mod: show recent Dwarfy ledger history.")
+    @app_commands.describe(
+        limit="Number of rows to show, max 50.",
+        listing="Optional listing/classified ID.",
+        entry_type="Optional ledger entry type.",
+        status="Optional DWF listing status: available, sold, or voided.",
+        search="Optional search text.",
+    )
+    async def history(
+        self,
+        interaction: discord.Interaction,
+        limit: int = 20,
+        listing: str | None = None,
+        entry_type: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> None:
+        if not await self._require_admin(interaction):
+            return
+        normalized_listing = None
+        if listing:
+            normalized_listing = parse_listing_id(listing) or parse_classified_id(listing) or listing.strip()
+        rows = await self.bot.db.history_entries(
+            limit=limit,
+            listing_id=normalized_listing,
+            entry_type=(entry_type or "").strip() or None,
+            status=(status or "").strip() or None,
+            search=(search or "").strip() or None,
+        )
+        if not rows:
+            await interaction.response.send_message("No matching ledger history found.", ephemeral=True)
+            return
+        lines = ["Dwarfy ledger history", ""]
+        for row in rows:
+            listing_text = row.get("listing_id") or "none"
+            lines.extend(
+                [
+                    f"#{row['id']} | {row['created_at']} | {row['entry_type']} | {listing_text}",
+                    (
+                        f"Item: {row.get('item_name') or 'none'} | Cash: {gp(int(row['cash_change']))} | "
+                        f"Inventory: {gp(int(row['inventory_cost_change']))} | Profit: {gp(int(row['profit_change']))}"
+                    ),
+                    f"Notes: {row['notes']}",
+                    "",
+                ]
+            )
+        await send_text_response(interaction, "\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="export", description="Admin/mod: export Dwarfy SQLite tables as CSV files.")
+    async def export(self, interaction: discord.Interaction) -> None:
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        files: list[discord.File] = []
+        for table_name in ("listings", "ledger", "classifieds"):
+            rows = await self.bot.db.export_table(table_name)
+            output = io.StringIO()
+            if rows:
+                writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+            else:
+                output.write("id\n")
+            files.append(
+                discord.File(
+                    io.BytesIO(output.getvalue().encode("utf-8")),
+                    filename=f"dwarfy-{table_name}.csv",
+                )
+            )
+        await interaction.followup.send("Dwarfy export ready.", files=files, ephemeral=True)
+
+    @app_commands.command(name="restock_status", description="Admin/mod: check owner-stock freshness.")
+    async def restock_status(self, interaction: discord.Interaction) -> None:
+        if not await self._require_admin(interaction):
+            return
+        status = await self.bot.db.owner_stock_status()
+        count = int(status.get("count") or 0)
+        if count == 0:
+            await interaction.response.send_message(
+                "Dwarfy has no current owner-stocked inventory. Run `/dwarfy stock_random clear_first:True` when ready.",
+                ephemeral=True,
+            )
+            return
+        output = (
+            "Dwarfy restock status\n\n"
+            f"* Owner-stocked listings: {count}\n"
+            f"* Oldest owner stock: {age_text(status.get('oldest_created_at'))}\n"
+            f"* Newest owner stock: {age_text(status.get('newest_created_at'))}\n"
+            f"* Latest batch: {status.get('latest_batch_id') or 'none'}\n\n"
+            "Refresh suggestion: run `/dwarfy stock_random clear_first:True` when the shelf feels stale."
+        )
+        await interaction.response.send_message(output, ephemeral=True)
+
+    @app_commands.command(name="debt_resolve", description="Admin/mod: mark a Dwarfy debt consequence as resolved.")
+    @app_commands.describe(
+        listing="Sold listing ID with debt, such as DWF-00017.",
+        reason="How the debt was resolved.",
+    )
+    async def debt_resolve(self, interaction: discord.Interaction, listing: str, reason: str) -> None:
+        if not await self._require_admin(interaction):
+            return
+        listing_id = parse_listing_id(listing)
+        if listing_id is None:
+            await interaction.response.send_message("Use a listing ID like `DWF-00017`.", ephemeral=True)
+            return
+        row = await self.bot.db.resolve_listing_debt(listing_id, reason)
+        if row is None:
+            await interaction.response.send_message(
+                f"I could not find unresolved debt for `{listing_id}`.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"Dwarfy debt resolved for {row['listing_id']} - {listing_display_name(row)}.\nReason: {reason}",
+            ephemeral=True,
+        )
 
     @app_commands.command(name="void", description="Void a listing for correction or abuse cleanup.")
     @app_commands.describe(

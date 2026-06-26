@@ -136,6 +136,51 @@ class DwarfyDatabase:
             )
             """
         )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS classifieds (
+                id INTEGER PRIMARY KEY,
+                classified_id TEXT UNIQUE,
+                item_name TEXT NOT NULL,
+                item_clean_name TEXT,
+                listing_display_name TEXT,
+                base_item_name TEXT,
+                variant TEXT,
+                details TEXT,
+                rarity TEXT NOT NULL,
+                source TEXT,
+                category TEXT,
+                tags TEXT,
+                variant_type TEXT,
+                variant_instructions TEXT,
+                item_type TEXT,
+                attunement TEXT,
+                page TEXT,
+                display_detail TEXT,
+                short_description TEXT,
+                rules_text TEXT,
+                json_notes TEXT,
+                item_tags TEXT,
+                seller_user_id TEXT NOT NULL,
+                seller_display_name TEXT NOT NULL,
+                seller_character_name TEXT NOT NULL,
+                seller_character_level INTEGER NOT NULL,
+                asking_price INTEGER NOT NULL,
+                broker_fee INTEGER NOT NULL,
+                buyer_total INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('open', 'sold', 'voided')),
+                buyer_user_id TEXT,
+                buyer_display_name TEXT,
+                buyer_character_name TEXT,
+                buyer_character_level INTEGER,
+                trade_log_text TEXT,
+                created_at TEXT NOT NULL,
+                sold_at TEXT,
+                voided_at TEXT,
+                void_reason TEXT
+            )
+            """
+        )
         await self._migrate_listings_table()
         await self.db.commit()
 
@@ -642,4 +687,380 @@ class DwarfyDatabase:
         )
         best = await cursor.fetchone()
         stats["most_profitable_flip"] = dict(best) if best else None
+
+        cursor = await self.db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM listings
+            WHERE status = 'available'
+              AND COALESCE(item_status, 'inventory') = 'inventory'
+              AND stock_source = 'owner_stock'
+            """
+        )
+        stats["owner_stock_available_count"] = int((await cursor.fetchone())["count"])
+
+        cursor = await self.db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM listings
+            WHERE status = 'available'
+              AND COALESCE(item_status, 'inventory') = 'inventory'
+              AND COALESCE(stock_source, '') != 'owner_stock'
+            """
+        )
+        stats["player_stock_available_count"] = int((await cursor.fetchone())["count"])
+
+        cursor = await self.db.execute(
+            """
+            SELECT listing_id, item_name, cost_basis
+            FROM listings
+            WHERE status = 'available'
+            ORDER BY cost_basis DESC, id ASC
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        stats["most_expensive_available_item"] = dict(row) if row else None
+
+        cursor = await self.db.execute(
+            """
+            SELECT listing_id, item_name, created_at
+            FROM listings
+            WHERE status = 'available'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        stats["oldest_unsold_item"] = dict(row) if row else None
+
+        cursor = await self.db.execute(
+            """
+            SELECT seller_display_name, COUNT(*) AS count, COALESCE(SUM(seller_payout), 0) AS total
+            FROM listings
+            WHERE seller_user_id != ''
+            GROUP BY seller_user_id, seller_display_name
+            ORDER BY count DESC, total DESC
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        stats["top_seller"] = dict(row) if row else None
+
+        cursor = await self.db.execute(
+            """
+            SELECT buyer_display_name, COUNT(*) AS count, COALESCE(SUM(final_sale_price), 0) AS total
+            FROM listings
+            WHERE status = 'sold' AND buyer_user_id IS NOT NULL
+            GROUP BY buyer_user_id, buyer_display_name
+            ORDER BY count DESC, total DESC
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        stats["top_buyer"] = dict(row) if row else None
         return stats
+
+    async def owner_stock_status(self) -> dict[str, Any]:
+        """Return freshness information for current owner-stocked inventory."""
+        cursor = await self.db.execute(
+            """
+            SELECT COUNT(*) AS count,
+                   MIN(created_at) AS oldest_created_at,
+                   MAX(created_at) AS newest_created_at,
+                   MAX(stock_batch_id) AS latest_batch_id
+            FROM listings
+            WHERE status = 'available'
+              AND COALESCE(item_status, 'inventory') = 'inventory'
+              AND stock_source = 'owner_stock'
+            """
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else {
+            "count": 0,
+            "oldest_created_at": None,
+            "newest_created_at": None,
+            "latest_batch_id": None,
+        }
+
+    async def resolve_listing_debt(self, listing_id: str, reason: str) -> dict[str, Any] | None:
+        """Mark a sold listing's debt consequence as resolved."""
+        listing = await self.get_listing(listing_id)
+        if listing is None or not listing.get("debt_total"):
+            return None
+        await self.db.execute(
+            """
+            UPDATE listings
+            SET debt_status = 'resolved'
+            WHERE UPPER(listing_id) = UPPER(?)
+            """,
+            (listing_id,),
+        )
+        await self.add_ledger_entry(
+            entry_type="debt_resolved",
+            listing_id=listing["listing_id"],
+            item_name=listing["item_name"],
+            cash_change=0,
+            inventory_cost_change=0,
+            profit_change=0,
+            notes=f"Debt resolved: {reason.strip()}",
+            commit=False,
+        )
+        await self.db.commit()
+        return await self.get_listing(listing_id)
+
+    async def history_entries(
+        self,
+        *,
+        limit: int = 20,
+        listing_id: str | None = None,
+        entry_type: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent ledger entries with optional listing filters."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if listing_id:
+            clauses.append("UPPER(ledger.listing_id) = UPPER(?)")
+            params.append(listing_id)
+        if entry_type:
+            clauses.append("ledger.entry_type = ?")
+            params.append(entry_type.strip())
+        if status:
+            clauses.append("listings.status = ?")
+            params.append(status.strip())
+        if search:
+            like = f"%{search.strip()}%"
+            clauses.append(
+                """
+                (
+                    ledger.item_name LIKE ?
+                    OR ledger.notes LIKE ?
+                    OR ledger.listing_id LIKE ?
+                    OR listings.seller_display_name LIKE ?
+                    OR listings.buyer_display_name LIKE ?
+                    OR listings.seller_character_name LIKE ?
+                    OR listings.buyer_character_name LIKE ?
+                )
+                """
+            )
+            params.extend([like, like, like, like, like, like, like])
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, min(int(limit), 50)))
+        cursor = await self.db.execute(
+            f"""
+            SELECT ledger.*,
+                   listings.status AS listing_status,
+                   listings.seller_display_name,
+                   listings.buyer_display_name
+            FROM ledger
+            LEFT JOIN listings ON UPPER(ledger.listing_id) = UPPER(listings.listing_id)
+            {where}
+            ORDER BY ledger.id DESC
+            LIMIT ?
+            """,
+            params,
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def export_table(self, table_name: str) -> list[dict[str, Any]]:
+        """Return rows for a known export table."""
+        if table_name not in {"listings", "ledger", "classifieds"}:
+            raise ValueError(f"Unsupported export table: {table_name}")
+        cursor = await self.db.execute(f"SELECT * FROM {table_name} ORDER BY id ASC")
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def create_classified(
+        self,
+        *,
+        item_name: str,
+        item_clean_name: str,
+        rarity: str,
+        source: str,
+        category: str,
+        tags: str,
+        seller_user_id: str,
+        seller_display_name: str,
+        seller_character_name: str,
+        seller_character_level: int,
+        asking_price: int,
+        broker_fee: int,
+        buyer_total: int,
+        listing_display_name: str | None = None,
+        base_item_name: str | None = None,
+        variant: str | None = None,
+        details: str | None = None,
+        variant_type: str | None = None,
+        variant_instructions: str | None = None,
+        item_type: str | None = None,
+        attunement: str | None = None,
+        page: str | None = None,
+        display_detail: str | None = None,
+        short_description: str | None = None,
+        rules_text: str | None = None,
+        json_notes: str | None = None,
+        item_tags: str | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now_text()
+        cursor = await self.db.execute(
+            """
+            INSERT INTO classifieds (
+                classified_id, item_name, item_clean_name, listing_display_name,
+                base_item_name, variant, details, rarity, source, category, tags,
+                variant_type, variant_instructions, item_type, attunement, page,
+                display_detail, short_description, rules_text, json_notes, item_tags,
+                seller_user_id, seller_display_name, seller_character_name,
+                seller_character_level, asking_price, broker_fee, buyer_total,
+                status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+            """,
+            (
+                None,
+                item_name,
+                item_clean_name,
+                listing_display_name,
+                base_item_name,
+                variant,
+                details,
+                rarity,
+                source,
+                category,
+                tags,
+                variant_type,
+                variant_instructions,
+                item_type,
+                attunement,
+                page,
+                display_detail,
+                short_description,
+                rules_text,
+                json_notes,
+                item_tags,
+                seller_user_id,
+                seller_display_name,
+                seller_character_name,
+                seller_character_level,
+                asking_price,
+                broker_fee,
+                buyer_total,
+                now,
+            ),
+        )
+        row_id = cursor.lastrowid
+        classified_id = f"DWC-{row_id:05d}"
+        await self.db.execute(
+            "UPDATE classifieds SET classified_id = ? WHERE id = ?",
+            (classified_id, row_id),
+        )
+        await self.add_ledger_entry(
+            entry_type="classified_post",
+            listing_id=classified_id,
+            item_name=item_name,
+            cash_change=0,
+            inventory_cost_change=0,
+            profit_change=0,
+            notes=(
+                f"Classified posted by {seller_display_name} as "
+                f"{seller_character_name} for {asking_price}gp plus {broker_fee}gp fee."
+            ),
+            commit=False,
+        )
+        await self.db.commit()
+        return await self.get_classified(classified_id) or {}
+
+    async def get_classified(self, classified_id: str) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            "SELECT * FROM classifieds WHERE UPPER(classified_id) = UPPER(?)",
+            (classified_id.strip(),),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_open_classifieds(self) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            """
+            SELECT * FROM classifieds
+            WHERE status = 'open'
+            ORDER BY id ASC
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def mark_classified_sold(
+        self,
+        *,
+        classified_id: str,
+        buyer_user_id: str,
+        buyer_display_name: str,
+        buyer_character_name: str,
+        buyer_character_level: int,
+        trade_log_text: str,
+    ) -> bool:
+        classified = await self.get_classified(classified_id)
+        if classified is None or classified["status"] != "open":
+            return False
+        now = utc_now_text()
+        cursor = await self.db.execute(
+            """
+            UPDATE classifieds
+            SET status = 'sold',
+                buyer_user_id = ?,
+                buyer_display_name = ?,
+                buyer_character_name = ?,
+                buyer_character_level = ?,
+                trade_log_text = ?,
+                sold_at = ?
+            WHERE UPPER(classified_id) = UPPER(?) AND status = 'open'
+            """,
+            (
+                buyer_user_id,
+                buyer_display_name,
+                buyer_character_name,
+                buyer_character_level,
+                trade_log_text,
+                now,
+                classified_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            await self.db.rollback()
+            return False
+        await self.add_ledger_entry(
+            entry_type="classified_fee",
+            listing_id=classified["classified_id"],
+            item_name=classified["item_name"],
+            cash_change=int(classified["broker_fee"]),
+            inventory_cost_change=0,
+            profit_change=int(classified["broker_fee"]),
+            notes=f"Classified broker fee for {classified['item_name']}.",
+            commit=False,
+        )
+        await self.db.commit()
+        return True
+
+    async def void_classified(self, classified_id: str, reason: str) -> dict[str, Any] | None:
+        classified = await self.get_classified(classified_id)
+        if classified is None or classified["status"] == "voided":
+            return None
+        await self.db.execute(
+            """
+            UPDATE classifieds
+            SET status = 'voided', voided_at = ?, void_reason = ?
+            WHERE UPPER(classified_id) = UPPER(?)
+            """,
+            (utc_now_text(), reason.strip(), classified_id),
+        )
+        await self.add_ledger_entry(
+            entry_type="classified_void",
+            listing_id=classified["classified_id"],
+            item_name=classified["item_name"],
+            cash_change=0,
+            inventory_cost_change=0,
+            profit_change=0,
+            notes=f"Voided classified: {reason.strip()}",
+            commit=False,
+        )
+        await self.db.commit()
+        return await self.get_classified(classified_id)

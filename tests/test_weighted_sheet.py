@@ -1480,3 +1480,176 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         )
 
         self.assertIn("Original source: Dwarfy stock", receipt)
+
+
+class ClassifiedsTests(unittest.TestCase):
+    def test_classified_id_parser_accepts_pasted_lines(self):
+        from cogs.dwarfy import parse_classified_id
+
+        self.assertEqual(parse_classified_id("DWC-17 - Bag of Holding"), "DWC-00017")
+        self.assertEqual(parse_classified_id("`dwc 00042`"), "DWC-00042")
+
+    def test_classified_fee_is_buyer_paid_twenty_percent(self):
+        from cogs.dwarfy import classified_fee_for_price
+
+        self.assertEqual(classified_fee_for_price(410), 82)
+        self.assertEqual(classified_fee_for_price(1), 0)
+
+    def test_classified_trade_log_shows_seller_fee_and_buyer_total(self):
+        from cogs.dwarfy import build_classified_trade_log
+
+        row = {
+            "classified_id": "DWC-00001",
+            "item_name": "Tentacle Rod",
+            "listing_display_name": "Tentacle Rod",
+            "seller_user_id": "123",
+            "seller_display_name": "Seller",
+            "seller_character_name": "Beto Dread",
+            "seller_character_level": 9,
+            "asking_price": 410,
+            "broker_fee": 82,
+            "buyer_total": 492,
+        }
+
+        output = build_classified_trade_log(row, buyer="@Buyer", buyer_character="Azaez (3)")
+
+        self.assertIn("@Buyer as Azaez (3) pays 492gp total", output)
+        self.assertIn("410gp to <@123> as Beto Dread (9)", output)
+        self.assertIn("82gp to Dwarfy's Shop", output)
+
+    def test_classified_browse_output_is_private_copyable_text(self):
+        from cogs.dwarfy import build_classified_browse_output
+
+        row = {
+            "classified_id": "DWC-00001",
+            "item_name": "+1 Weapon (Longsword)",
+            "listing_display_name": "+1 Weapon (Longsword)",
+            "rarity": "Uncommon",
+            "asking_price": 160,
+            "broker_fee": 32,
+            "buyer_total": 192,
+        }
+
+        output = build_classified_browse_output([row])
+
+        self.assertIn("Dwarfy's Classifieds has 1 open posting", output)
+        self.assertIn("DWC-00001 - +1 Weapon (Longsword) - Uncommon", output)
+        self.assertIn("Buyer total: 192gp", output)
+
+    def test_classified_database_flow_records_fee_ledger_and_export(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_classified(
+                        item_name="Tentacle Rod",
+                        item_clean_name="Tentacle Rod",
+                        listing_display_name="Tentacle Rod",
+                        rarity="Rare",
+                        source="DMG 2024",
+                        category="Rod",
+                        tags="rod",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Beto Dread",
+                        seller_character_level=9,
+                        asking_price=410,
+                        broker_fee=82,
+                        buyer_total=492,
+                    )
+                    open_before = await db.list_open_classifieds()
+                    sold = await db.mark_classified_sold(
+                        classified_id=row["classified_id"],
+                        buyer_user_id="456",
+                        buyer_display_name="Buyer",
+                        buyer_character_name="Azaez",
+                        buyer_character_level=3,
+                        trade_log_text="trade log",
+                    )
+                    fetched = await db.get_classified(row["classified_id"])
+                    history = await db.history_entries(
+                        listing_id=row["classified_id"],
+                        entry_type="classified_fee",
+                    )
+                    exported = await db.export_table("classifieds")
+                finally:
+                    await db.close()
+                return row, open_before, sold, fetched, history, exported
+
+        row, open_before, sold, fetched, history, exported = asyncio.run(run_case())
+
+        self.assertEqual(row["classified_id"], "DWC-00001")
+        self.assertEqual([entry["classified_id"] for entry in open_before], ["DWC-00001"])
+        self.assertTrue(sold)
+        self.assertEqual(fetched["status"], "sold")
+        self.assertEqual(fetched["buyer_character_name"], "Azaez")
+        self.assertEqual(history[0]["cash_change"], 82)
+        self.assertEqual(history[0]["profit_change"], 82)
+        self.assertEqual(exported[0]["trade_log_text"], "trade log")
+
+    def test_void_classified_keeps_record_and_removes_open_listing(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_classified(
+                        item_name="Potion",
+                        item_clean_name="Potion",
+                        rarity="Common",
+                        source="DMG 2024",
+                        category="Potion",
+                        tags="potion",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Seller PC",
+                        seller_character_level=1,
+                        asking_price=50,
+                        broker_fee=10,
+                        buyer_total=60,
+                    )
+                    voided = await db.void_classified(row["classified_id"], "test cleanup")
+                    open_after = await db.list_open_classifieds()
+                finally:
+                    await db.close()
+                return voided, open_after
+
+        voided, open_after = asyncio.run(run_case())
+
+        self.assertEqual(voided["status"], "voided")
+        self.assertEqual(voided["void_reason"], "test cleanup")
+        self.assertEqual(open_after, [])
+
+    def test_inspect_embed_uses_polished_card_fields(self):
+        from cogs.dwarfy import build_inspect_embed
+
+        listing = {
+            "listing_id": "DWF-00001",
+            "listing_display_name": "Ring of Protection",
+            "item_name": "Ring of Protection",
+            "rarity": "Rare",
+            "source": "DMG 2024",
+            "page": "294",
+            "seller_user_id": "123",
+            "seller_display_name": "Seller",
+            "seller_character_name": "Beto",
+            "seller_character_level": 9,
+            "cost_basis": 1600,
+            "status": "available",
+            "sale_method": "direct",
+            "short_description": "A protective ring.",
+            "created_at": "2026-06-26T00:00:00+00:00",
+        }
+
+        embed = build_inspect_embed(listing)
+
+        self.assertEqual(embed.title, "Ring of Protection")
+        field_names = [field.name for field in embed.fields]
+        self.assertIn("Listing", field_names)
+        self.assertIn("Price on Buy", field_names)
+        self.assertIn("Sale Method", field_names)

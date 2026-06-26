@@ -17,7 +17,8 @@ Google Sheets is the master item reference. SQLite is the live shop inventory an
 - Lets players sell permanent magic items directly with `/dwarfy sell`.
 - Lets players broker permanent magic-item sales with `/dwarfy broker`.
 - Lets players browse, inspect, and buy Dwarfy shop listings.
-- Lets admins/mods run `/dwarfy stats`, `/dwarfy void`, and `/dwarfy reload`.
+- Lets players post and buy player-to-player classified listings with Dwarfy taking a buyer-paid broker fee.
+- Lets admins/mods run `/dwarfy stats`, `/dwarfy history`, `/dwarfy export`, `/dwarfy void`, and `/dwarfy reload`.
 - Rolls session loot with `/sessionloot`.
 
 The bot does not check character ownership, deduct DTP, deduct gold, or manage mundane equipment. Players should record all downtime and purchases manually on their adventure logs.
@@ -59,6 +60,7 @@ ADMIN_ROLE_NAMES=Admin,Moderator,DM,Loot Manager
 DWARFY_SELL_CHANNEL_ID=your_sell_channel_id
 DWARFY_SHOP_CHANNEL_ID=your_shop_channel_id
 SESSION_LOOT_CHANNEL_ID=your_session_loot_channel_id_or_blank
+DEATH_UNRESOLVED_LOG_CHANNEL_ID=your_death_and_unresolved_log_channel_id_or_blank
 
 GOOGLE_SHEET_ID=your_google_sheet_id
 GOOGLE_SERVICE_ACCOUNT_FILE=service-account.json
@@ -69,6 +71,8 @@ DATABASE_PATH=data/dwarfy.sqlite
 ```
 
 `SESSION_LOOT_CHANNEL_ID` may be left blank. If it is blank, `/sessionloot` works in any channel.
+
+`DEATH_UNRESOLVED_LOG_CHANNEL_ID` may be left blank. If it is filled in, Dwarfy automatically posts unresolved debt/jail consequences there when a buyer cannot cover the final item price.
 
 ## Get Discord IDs
 
@@ -365,6 +369,7 @@ After that, test the shop flow:
 4. In the shop channel, run `/dwarfy browse`.
 5. Run `/dwarfy inspect listing:DWF-00001`.
 6. Run `/dwarfy buy listing:DWF-00001 character:Other Name level:5 gold:2000`.
+7. Try `/dwarfy classified_post` and `/dwarfy classified_browse` in the shop channel.
 
 ## Commands
 
@@ -376,6 +381,10 @@ After that, test the shop flow:
 - `/dwarfy browse`
 - `/dwarfy inspect`
 - `/dwarfy buy`
+- `/dwarfy classified_post`
+- `/dwarfy classified_browse`
+- `/dwarfy classified_inspect`
+- `/dwarfy classified_buy`
 - `/sessionloot`
 
 ### Admin/Mod Commands
@@ -383,7 +392,12 @@ After that, test the shop flow:
 These require one of the role names in `ADMIN_ROLE_NAMES`:
 
 - `/dwarfy stats`
+- `/dwarfy history`
+- `/dwarfy export`
+- `/dwarfy restock_status`
+- `/dwarfy debt_resolve`
 - `/dwarfy void`
+- `/dwarfy classified_void`
 - `/dwarfy reload`
 
 ### Owner Commands
@@ -397,15 +411,17 @@ These require either Discord server ownership or an `Owner` role:
 
 Owner-stocked listings are marked separately in SQLite with `stock_source=owner_stock`. They show up in `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy` like normal shop inventory, but their origin displays as `Dwarfy stock` instead of a player seller.
 
+`/dwarfy stock_random` replies with a restock summary: batch ID, rarity breakdown, permanent/consumable breakdown, total cost basis added, and notable items. `/dwarfy restock_status` shows how old the current owner-stock shelf is.
+
 ## Channel Rules
 
 - `/dwarfy sell` and `/dwarfy broker` only work in `DWARFY_SELL_CHANNEL_ID`.
-- `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy` only work in `DWARFY_SHOP_CHANNEL_ID`.
+- `/dwarfy browse`, `/dwarfy inspect`, `/dwarfy buy`, and Dwarfy Classifieds commands only work in `DWARFY_SHOP_CHANNEL_ID`.
 - `/sessionloot` only checks `SESSION_LOOT_CHANNEL_ID` if that value is filled in.
 
 Wrong-channel errors are private.
 
-`/dwarfy browse` and `/dwarfy inspect` replies are private to the person who ran the command so shop lookups do not clutter the channel. Browse uses a paginated item card with Previous and Next buttons. The Show All button sends the matching list as copyable plain text, up to a safety cap, split across private follow-up messages when needed. Completed sales, brokered sales, purchases, and session loot remain public audit messages.
+`/dwarfy browse`, `/dwarfy inspect`, `/dwarfy classified_browse`, and `/dwarfy classified_inspect` replies are private to the person who ran the command so shop lookups do not clutter the channel. Browse uses a paginated item card with Previous and Next buttons. The Show All button sends the matching list as copyable plain text, up to a safety cap, split across private follow-up messages when needed. Completed sales, brokered sales, purchases, classified postings, classified buys, and session loot remain public audit messages.
 
 ## Buying From Dwarfy
 
@@ -421,7 +437,33 @@ The bot first rolls the normal Xanathar-style asking price for the item's rarity
 
 The haggling roll can only reduce the item price. The final item price can never be below Dwarfy's cost basis. `/dwarfy buy` has no DTP cost and no flat shop/search expense; only the final item price matters.
 
-Once `/dwarfy buy` is submitted and the listing is valid, the deal is final. If the final item price is higher than the declared gold, the bot still marks the item as sold to that character. The character owes the shortfall plus a `5,000gp` contract-default fine, is jailed/unplayable until that debt is paid, and cannot sell or trade the item until the debt is cleared.
+Once `/dwarfy buy` is submitted and the listing is valid, the deal is final. If the final item price is higher than the declared gold, the bot still marks the item as sold to that character. The character owes the shortfall plus a `5,000gp` contract-default fine, is jailed/unplayable until that debt is paid, and cannot sell or trade the item until the debt is cleared. If `DEATH_UNRESOLVED_LOG_CHANNEL_ID` is set, Dwarfy posts that consequence automatically to the unresolved log channel. Admins/mods can later run `/dwarfy debt_resolve`.
+
+## Dwarfy Classifieds
+
+Dwarfy Classifieds is a player-to-player board. Dwarfy does not own the item and it does not enter shop inventory.
+
+`/dwarfy classified_post` lets a player post a magic item from `Bot Items` with an asking price. The item field autocompletes clean sheet item names. Generic/template items can use `variant`.
+
+Dwarfy adds a buyer-paid `20%` broker fee:
+
+```text
+Seller asks: 410gp
+Dwarfy fee: 82gp
+Buyer total: 492gp
+```
+
+`/dwarfy classified_browse` and `/dwarfy classified_inspect` are private. `/dwarfy classified_buy` is public and produces copyable trade-log text showing what the buyer pays the seller and what the buyer pays Dwarfy.
+
+Classified IDs use `DWC-00001`, `DWC-00002`, and so on. Inventory listings still use `DWF-00001`.
+
+## Admin Audit Tools
+
+`/dwarfy history` shows recent ledger rows privately. It can filter by listing/classified ID, entry type, status, and search text.
+
+`/dwarfy export` privately sends CSV files for `listings`, `ledger`, and `classifieds`. This is useful for reconciliation outside Discord.
+
+`/dwarfy stats` is a private dashboard with active inventory, owner stock vs player stock, cash flow, realized profit, best flip, most expensive item, oldest unsold item, and top seller/buyer.
 
 ## Common Errors
 
