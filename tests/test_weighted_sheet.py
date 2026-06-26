@@ -1353,6 +1353,12 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertEqual(stock_rarity_from_roll(100, consumable=False), "Legendary")
         self.assertEqual(stock_rarity_from_roll(96, consumable=True), "Very Rare")
 
+    def test_random_stock_defaults_to_25_items(self):
+        from cogs.dwarfy import DEFAULT_RANDOM_CONSUMABLE_COUNT, DEFAULT_RANDOM_PERMANENT_COUNT
+
+        self.assertEqual(DEFAULT_RANDOM_PERMANENT_COUNT, 10)
+        self.assertEqual(DEFAULT_RANDOM_CONSUMABLE_COUNT, 15)
+
     def test_owner_stock_item_pool_uses_nearest_rarity_fallback(self):
         from cogs.dwarfy import stock_item_pool
 

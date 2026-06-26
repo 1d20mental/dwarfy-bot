@@ -391,7 +391,7 @@ These require one of the role names in `ADMIN_ROLE_NAMES`:
 These require either Discord server ownership or an `Owner` role:
 
 - `/dwarfy stock_add` adds a specific item from `Bot Items` to Dwarfy's inventory. The `item` field autocompletes clean item names. Generic/template items can use `variant`, such as `Longsword` for `+1 Weapon`. `cost_basis` is optional; if blank, the bot uses the same 40% direct-sale value Dwarfy would pay a player.
-- `/dwarfy stock_random` adds a weighted random batch of shop stock from the Google Sheet. By default it creates 20 permanent items and 30 consumables using an owner-stock rarity table and the sheet's item weights. `clear_first=True` voids old owner stock before adding the new batch. Generic/template items are resolved automatically when possible; ammunition variants stock as 20 arrows, 20 bolts, or 10 bullets.
+- `/dwarfy stock_random` adds a weighted random batch of shop stock from the Google Sheet. By default it creates 10 permanent items and 15 consumables using an owner-stock rarity table and the sheet's item weights. `clear_first=True` voids old owner stock before adding the new batch. Generic/template items are resolved automatically when possible; ammunition variants stock as 20 arrows, 20 bolts, or 10 bullets.
 - `/dwarfy stock_clear` voids currently available owner-stocked listings. It does not delete records, and it does not touch player-sold inventory.
 - `/dwarfy stock_gold` records gold added to Dwarfy's ledger for audit purposes.
 

@@ -49,6 +49,8 @@ BROWSE_RARITY_CHOICES = [
 BROWSE_RARITY_VALUES = {choice.value for choice in BROWSE_RARITY_CHOICES}
 BROWSE_LISTING_CAP = 100
 BROWSE_PAGE_SIZE = 10
+DEFAULT_RANDOM_PERMANENT_COUNT = 10
+DEFAULT_RANDOM_CONSUMABLE_COUNT = 15
 RARITY_COLORS = {
     "Common": 0x8A8F98,
     "Uncommon": 0x2ECC71,
@@ -1287,8 +1289,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
     @app_commands.command(name="stock_random", description="Owner only: add random weighted shop stock.")
     @app_commands.describe(
-        permanent_count="Permanent item count. Defaults to 20.",
-        consumable_count="Consumable item count. Defaults to 30.",
+        permanent_count="Permanent item count. Defaults to 10.",
+        consumable_count="Consumable item count. Defaults to 15.",
         apl="APL band to use for sheet eligibility. Defaults to 10.",
         tag="Optional tag preference.",
         clear_first="Void existing owner stock before adding the new batch.",
@@ -1296,8 +1298,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     async def stock_random(
         self,
         interaction: discord.Interaction,
-        permanent_count: int = 20,
-        consumable_count: int = 30,
+        permanent_count: int = DEFAULT_RANDOM_PERMANENT_COUNT,
+        consumable_count: int = DEFAULT_RANDOM_CONSUMABLE_COUNT,
         apl: int = 10,
         tag: str | None = None,
         clear_first: bool = False,
