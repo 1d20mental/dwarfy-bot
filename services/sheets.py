@@ -13,6 +13,8 @@ from typing import Iterable
 import gspread
 from google.oauth2.service_account import Credentials
 
+from services.equipment import base_cost_has_price_signal, parse_static_base_price
+
 
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
@@ -46,6 +48,7 @@ class SheetItem:
     max_apl: int | None
     notes: str
     base_price: int | None = None
+    base_price_text: str = ""
     roll_rarity: str = ""
     weight: int = 1
     session_eligible: bool = False
@@ -156,24 +159,17 @@ def parse_base_price(value: object, *, row_number: int, warnings: list[str]) -> 
     if not text:
         return None
 
-    normalized = (
-        text.casefold()
-        .replace(",", "")
-        .replace("gp", "")
-        .replace("gold", "")
-        .strip()
-    )
-    try:
-        number = Decimal(normalized)
-    except InvalidOperation:
-        warnings.append(f"Bot Items row {row_number} has invalid Base Price {text!r}; Dwarfy pricing disabled.")
+    plain_price = parse_static_base_price(text)
+    if plain_price is not None:
+        return plain_price
+
+    # Formula values such as "400gp (plus cost of armor)" are resolved later,
+    # once the command knows the concrete variant.
+    if base_cost_has_price_signal(text):
         return None
 
-    if number != number.to_integral_value() or number < 1:
-        warnings.append(f"Bot Items row {row_number} has invalid Base Price {text!r}; Dwarfy pricing disabled.")
-        return None
-
-    return int(number)
+    warnings.append(f"Bot Items row {row_number} has invalid Base Price {text!r}; Dwarfy pricing disabled.")
+    return None
 
 
 def parse_weight(value: object, *, row_number: int, warnings: list[str]) -> int:
@@ -323,6 +319,7 @@ def _sell_match_key(item: SheetItem) -> tuple[object, ...]:
         item.allowed,
         item.dwarfy_sell_eligible,
         item.base_price,
+        item.base_price_text.casefold().strip(),
         item.item_type,
         item.attunement,
         item.page,
@@ -333,6 +330,11 @@ def _sell_match_key(item: SheetItem) -> tuple[object, ...]:
         item.variant_instructions,
         item.variant_options,
     )
+
+
+def item_has_dwarfy_base_cost(item: SheetItem) -> bool:
+    """Return True if the row has a numeric or formula Base Cost value."""
+    return item.base_price is not None or base_cost_has_price_signal(item.base_price_text)
 
 
 GENERIC_ITEM_NAMES = {
@@ -591,8 +593,9 @@ class SheetCache:
                 if has_weight
                 else 1
             )
+            base_price_text = _cell(row, headers, base_price_column) if base_price_column else ""
             base_price = (
-                parse_base_price(_cell(row, headers, base_price_column), row_number=row_number, warnings=self.warnings)
+                parse_base_price(base_price_text, row_number=row_number, warnings=self.warnings)
                 if base_price_column
                 else None
             )
@@ -631,6 +634,7 @@ class SheetCache:
                     session_eligible=session_eligible,
                     dwarfy_sell_eligible=dwarfy_sell_eligible,
                     base_price=base_price,
+                    base_price_text=base_price_text,
                     variant_type=_cell(row, headers, "Variant Type"),
                     variant_instructions=_cell(row, headers, "Variant Instructions"),
                     page=_cell(row, headers, "Page"),
@@ -682,7 +686,7 @@ class SheetCache:
 
     def _sell_preference_score(self, item: SheetItem) -> int:
         score = 0
-        if item.base_price is not None:
+        if item_has_dwarfy_base_cost(item):
             score += 8
         if item.allowed:
             score += 4
@@ -738,7 +742,7 @@ class SheetCache:
             if for_sell:
                 if item.consumable:
                     continue
-                if item.base_price is None:
+                if not item_has_dwarfy_base_cost(item):
                     continue
             score = _score_match(query, item.name)
             if score < 0.58:
@@ -776,7 +780,7 @@ class SheetCache:
         for item in self.items:
             if not item.allowed or item.consumable or item.dwarfy_sell_eligible is False:
                 continue
-            if item.base_price is None:
+            if not item_has_dwarfy_base_cost(item):
                 continue
             key = item.name.casefold().strip()
             if key in seen:

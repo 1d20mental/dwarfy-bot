@@ -184,8 +184,12 @@ Rules:
 - `Roll Rarity` is the rarity bucket used by `/sessionloot`.
 - `Base Price` is the item economy value used by `/dwarfy sell`, `/dwarfy broker`, `/dwarfy stock_add`, `/dwarfy stock_random`, `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy`.
 - `Base Cost` is also accepted as an alias for `Base Price`.
-- Blank `Base Price` means Dwarfy cannot directly buy, broker, stock, or sell that item. It will not autocomplete for Dwarfy sell/broker/stock. Players can still post it in classifieds because the seller chooses the asking price there.
-- `Base Price` must be a positive whole number. Commas and `gp` are okay, such as `4,000gp`. Invalid values create a reload warning and disable Dwarfy shop pricing for that row.
+- Plain `Base Price` / `Base Cost` values should be positive whole gp values. Commas and `gp` are okay, such as `4,000gp`.
+- Formula-style `Base Cost` values are supported for template items, such as `400gp (plus cost of armor)`, `400gp (plus cost of weapon)`, or `400gp (plus 10gp for Shield)`.
+- When a Base Cost formula needs armor, weapon, shield, or ammunition cost, the player or owner stock command must provide a concrete `variant`, such as `Breastplate`, `Plate Armor`, `Longsword`, `Warhammer`, `Shield`, `20 arrows`, `20 bolts`, or `10 bullets`.
+- Dwarfy stores the final resolved whole-gp base price on the listing. Example: `400gp (plus cost of armor)` with `variant: Breastplate` becomes `800gp`.
+- Blank `Base Price` / `Base Cost` means Dwarfy cannot directly buy, broker, stock, or sell that item. It will not autocomplete for Dwarfy sell/broker/stock. Players can still post it in classifieds because the seller chooses the asking price there.
+- Invalid values create a reload warning and disable Dwarfy shop pricing for that row.
 - Blank `Roll Rarity` excludes a row from session loot.
 - If the whole `Roll Rarity` column is missing, the bot falls back to `Rarity` for older sheets.
 - `Weight` is relative probability for session loot.

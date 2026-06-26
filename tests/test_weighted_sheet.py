@@ -21,6 +21,7 @@ from services.pricing import (
     roll_broker_price,
     roll_buy_price,
 )
+from services.equipment import resolve_base_cost
 from services.sheets import MonsterComponent, SheetCache, SheetItem
 
 
@@ -81,7 +82,10 @@ def item(
     item_tags="",
     variant_options="",
     base_price=400,
+    base_price_text=None,
 ):
+    if base_price_text is None:
+        base_price_text = str(base_price) if base_price is not None else ""
     return SheetItem(
         name=name,
         rarity=rarity,
@@ -100,6 +104,7 @@ def item(
         min_apl=min_apl,
         max_apl=max_apl,
         base_price=base_price,
+        base_price_text=base_price_text,
         session_eligible=session_eligible,
         dwarfy_sell_eligible=dwarfy_sell_eligible,
         variant_type=variant_type,
@@ -190,6 +195,32 @@ class SheetParsingTests(unittest.TestCase):
         _cache, items = self.load_items(rows)
 
         self.assertEqual(items[0].base_price, 4000)
+
+    def test_formula_base_cost_is_kept_for_variant_resolution(self):
+        rows = [
+            ["Item Name", "Rarity", "Roll Rarity", "Base Cost", "Consumable", "Allowed", "Session Eligible"],
+            ["Enspelled Armor", "Uncommon", "Uncommon", "400 GP (plus cost of armor)", "FALSE", "TRUE", "TRUE"],
+        ]
+        cache, items = self.load_items(rows)
+
+        self.assertIsNone(items[0].base_price)
+        self.assertEqual(items[0].base_price_text, "400 GP (plus cost of armor)")
+        self.assertEqual(len([warning for warning in cache.warnings if "invalid Base Price" in warning]), 0)
+
+    def test_base_cost_formulas_resolve_with_equipment_variants(self):
+        armor = resolve_base_cost("400 GP (plus cost of armor)", variant="Breastplate")
+        weapon = resolve_base_cost("400 GP (plus cost of weapon)", variant="Longsword")
+        shield = resolve_base_cost("400 GP (plus 10 GP for Shield)")
+
+        self.assertEqual(armor.base_price, 800)
+        self.assertEqual(weapon.base_price, 415)
+        self.assertEqual(shield.base_price, 410)
+
+    def test_base_cost_formula_requires_variant_when_needed(self):
+        result = resolve_base_cost("400 GP (plus cost of armor)")
+
+        self.assertIsNone(result.base_price)
+        self.assertTrue(result.needs_variant)
 
     def test_invalid_base_price_warns_and_disables_dwarfy_pricing(self):
         rows = [
@@ -1287,12 +1318,14 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         cache = make_cache([
             item("Ring of Protection", rarity="Rare", roll_rarity="Uncommon"),
             item("Ring of Protection", rarity="Rare", roll_rarity="Rare"),
+            item("Enspelled Armor", base_price=None, base_price_text="400 GP (plus cost of armor)"),
             item("Potion of Healing", consumable=True),
             item("Blocked", dwarfy_sell_eligible=False),
             item("No Base Price", base_price=None),
         ])
 
         self.assertEqual(cache.autocomplete_sell_item_names("ring"), ["Ring of Protection"])
+        self.assertIn("Enspelled Armor", cache.autocomplete_sell_item_names(""))
         self.assertNotIn("No Base Price", cache.autocomplete_sell_item_names(""))
 
     def test_ring_of_protection_sells_as_clean_name_with_enriched_data(self):
@@ -1362,6 +1395,26 @@ class MatchingAndDwarfyTests(unittest.TestCase):
 
         self.assertEqual(match.item.name, "Classified Only")
         self.assertIn("classifieds", sell_validation_error(match.item))
+
+    def test_formula_base_cost_passes_shared_validation_and_resolves_for_pricing(self):
+        from cogs.dwarfy import resolve_sheet_item_base_price, sell_validation_error
+
+        row = item("Enspelled Armor", base_price=None, base_price_text="400 GP (plus cost of armor)")
+
+        self.assertIsNone(sell_validation_error(row))
+        resolution = resolve_sheet_item_base_price(row, "Breastplate")
+
+        self.assertEqual(resolution.base_price, 800)
+        self.assertEqual(direct_sell_price(resolution.base_price).seller_payout, 320)
+
+    def test_formula_base_cost_requires_variant_for_pricing(self):
+        from cogs.dwarfy import resolve_sheet_item_base_price
+
+        row = item("Enspelled Armor", base_price=None, base_price_text="400 GP (plus cost of armor)")
+        resolution = resolve_sheet_item_base_price(row)
+
+        self.assertIsNone(resolution.base_price)
+        self.assertTrue(resolution.needs_variant)
 
     def test_dwarfy_sell_details_resolve_listing_name(self):
         from cogs.dwarfy import resolved_listing_name
@@ -1446,6 +1499,20 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertEqual(weapon_variant, "Rapier")
         self.assertEqual(ammo_name, "Ammunition of Slaying (10 bullets)")
         self.assertEqual(ammo_variant, "10 bullets")
+
+    def test_random_stock_uses_base_cost_formula_to_pick_variant(self):
+        from cogs.dwarfy import resolve_random_stock_identity, resolve_sheet_item_base_price
+
+        row = item("Enspelled Armor", base_price=None, base_price_text="400 GP (plus cost of armor)")
+
+        with patch("cogs.dwarfy.random.choice", return_value="Breastplate"):
+            listing_name, variant, note = resolve_random_stock_identity(row)
+        resolution = resolve_sheet_item_base_price(row, variant)
+
+        self.assertEqual(listing_name, "Enspelled Armor (Breastplate)")
+        self.assertEqual(variant, "Breastplate")
+        self.assertEqual(resolution.base_price, 800)
+        self.assertIn("Random variant: Breastplate.", note)
 
     def test_item_detail_summary_uses_enriched_display_detail(self):
         from services.sheets import item_detail_summary
@@ -1574,6 +1641,14 @@ class MatchingAndDwarfyTests(unittest.TestCase):
             [
                 item("Uncommon Permanent", rarity="Uncommon", roll_rarity="Uncommon", consumable=False),
                 item("No Price Permanent", rarity="Uncommon", roll_rarity="Uncommon", consumable=False, base_price=None),
+                item(
+                    "Formula Permanent",
+                    rarity="Uncommon",
+                    roll_rarity="Uncommon",
+                    consumable=False,
+                    base_price=None,
+                    base_price_text="400 GP (plus cost of weapon)",
+                ),
                 item("Monster Trigger", rarity="Common", roll_rarity="Common", loot_type="Monster Component"),
             ]
         )
@@ -1581,7 +1656,7 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         selected_rarity, pool = stock_item_pool(cache=cache, rarity="Common", consumable=False, apl=9)
 
         self.assertEqual(selected_rarity, "Uncommon")
-        self.assertEqual([entry.name for entry in pool], ["Uncommon Permanent"])
+        self.assertEqual([entry.name for entry in pool], ["Uncommon Permanent", "Formula Permanent"])
 
     def test_owner_stock_autocomplete_is_unique_and_allows_consumables(self):
         from cogs.dwarfy import Dwarfy
@@ -1591,6 +1666,7 @@ class MatchingAndDwarfyTests(unittest.TestCase):
                 item("Bag of Holding", consumable=False),
                 item("Bag of Holding", consumable=False, min_apl=5),
                 item("Potion of Healing", consumable=True),
+                item("Formula Weapon", consumable=False, base_price=None, base_price_text="400 GP (plus cost of weapon)"),
                 item("No Price", consumable=False, base_price=None),
                 item("Forbidden Item", allowed=False),
                 item("Monster Trigger", loot_type="Monster Component"),
@@ -1601,7 +1677,7 @@ class MatchingAndDwarfyTests(unittest.TestCase):
 
         names = cog._stock_item_autocomplete_names("")
 
-        self.assertEqual(names, ["Bag of Holding", "Potion of Healing"])
+        self.assertEqual(names, ["Bag of Holding", "Potion of Healing", "Formula Weapon"])
 
     def test_owner_stock_clear_only_voids_owner_stock(self):
         from services.database import DwarfyDatabase

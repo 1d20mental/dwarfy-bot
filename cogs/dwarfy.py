@@ -14,6 +14,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from services.equipment import (
+    BaseCostResolution,
+    base_cost_requires_variant,
+    base_cost_variant_groups,
+    resolve_base_cost,
+)
 from services.pricing import (
     buy_price_formula,
     direct_sell_price,
@@ -25,6 +31,7 @@ from services.loot import RARITY_ORDER, pick_weighted_item
 from services.sheets import (
     format_item_choices,
     is_generic_template_item,
+    item_has_dwarfy_base_cost,
     item_detail_summary,
     looks_like_pasted_detail_text,
     looks_like_pasted_item_text,
@@ -345,6 +352,34 @@ def record_base_price(record: dict[str, Any]) -> int | None:
     return int(value)
 
 
+def resolve_sheet_item_base_price(sheet_item: Any, variant: str | None = None) -> BaseCostResolution:
+    """Resolve a sheet row's Dwarfy base price for a specific variant."""
+    if sheet_item.base_price is not None:
+        price = int(sheet_item.base_price)
+        return BaseCostResolution(price, detail=f"{price}gp", recognized=True)
+    return resolve_base_cost(getattr(sheet_item, "base_price_text", ""), variant=variant)
+
+
+def base_cost_error_text(sheet_item: Any, resolution: BaseCostResolution) -> str:
+    """Build a friendly ephemeral message for unresolved Base Cost formulas."""
+    raw = getattr(sheet_item, "base_price_text", "").strip()
+    if resolution.needs_variant:
+        return (
+            f"`{sheet_item.name}` has Base Cost `{raw}`. Add a concrete variant such as "
+            "Breastplate, Plate Armor, Longsword, Warhammer, Shield, arrows, bolts, or bullets "
+            "so Dwarfy can add the mundane item cost."
+        )
+    if raw:
+        return (
+            f"`{sheet_item.name}` has Base Cost `{raw}`, but Dwarfy could not resolve it: "
+            f"{resolution.error} It can still be posted in classifieds."
+        )
+    return (
+        f"`{sheet_item.name}` does not have a Base Price in the sheet. "
+        "It cannot be sold directly, brokered, or stocked by Dwarfy, but it can still be posted in classifieds."
+    )
+
+
 def tier_warning_text(record: dict[str, Any], *, item_name: str, character: str, level: int) -> str:
     """Warn when a buyer's level is below the item's minimum server tier."""
     required_tier = record_minimum_tier(record)
@@ -385,7 +420,11 @@ def enrich_record_tier_from_cache(record: dict[str, Any], cache: Any) -> dict[st
             enriched["min_apl"] = match.item.min_apl
             enriched["minimum_tier"] = minimum_tier_for_min_apl(match.item.min_apl)
         if needs_base_price:
-            enriched["base_price"] = match.item.base_price
+            resolution = resolve_sheet_item_base_price(
+                match.item,
+                str(record.get("variant") or record.get("variant_details") or "").strip() or None,
+            )
+            enriched["base_price"] = resolution.base_price
         return enriched
     return record
 
@@ -925,7 +964,7 @@ def stock_item_pool(
                 consumable=consumable,
                 apl=apl,
             )
-            if item.loot_type == "Item" and item.base_price is not None
+            if item.loot_type == "Item" and item_has_dwarfy_base_cost(item)
         ]
         if tag_norm:
             tagged = [item for item in pool if tag_norm in item.tags]
@@ -1022,12 +1061,28 @@ def random_variant_from_sheet_item(sheet_item: Any) -> str | None:
     return None
 
 
+def random_variant_from_base_cost(sheet_item: Any) -> str | None:
+    """Choose a variant from the Base Cost formula when sheet metadata is thin."""
+    groups = base_cost_variant_groups(getattr(sheet_item, "base_price_text", ""))
+    if "ammunition" in groups:
+        return random.choice(RANDOM_AMMUNITION_VARIANTS)
+    if "shield" in groups:
+        return "Shield"
+    if "armor" in groups:
+        return random.choice(RANDOM_ARMOR_VARIANTS)
+    if "weapon" in groups:
+        return random.choice(RANDOM_WEAPON_VARIANTS)
+    return None
+
+
 def resolve_random_stock_identity(sheet_item: Any) -> tuple[str, str | None, str | None]:
     """Return listing name, variant, and note text for a random stock item."""
-    if not is_generic_template_item(sheet_item):
+    if not is_generic_template_item(sheet_item) and not base_cost_requires_variant(
+        getattr(sheet_item, "base_price_text", "")
+    ):
         return sheet_item.name, None, None
 
-    variant = random_variant_from_sheet_item(sheet_item)
+    variant = random_variant_from_sheet_item(sheet_item) or random_variant_from_base_cost(sheet_item)
     if not variant:
         return (
             sheet_item.name,
@@ -1098,7 +1153,7 @@ def sell_validation_error(sheet_item) -> str | None:
         return f"`{sheet_item.name}` is marked Consumable=TRUE. Dwarfy only buys permanent magic items."
     if sheet_item.dwarfy_sell_eligible is False:
         return f"`{sheet_item.name}` is marked Dwarfy Sell Eligible=FALSE and cannot be sold to Dwarfy."
-    if sheet_item.base_price is None:
+    if not item_has_dwarfy_base_cost(sheet_item):
         return (
             f"`{sheet_item.name}` does not have a Base Price in the sheet. "
             "It cannot be sold directly or brokered through Dwarfy, but it can still be posted in classifieds."
@@ -1150,6 +1205,7 @@ def build_sell_receipt(
     roll_value: int | None = None,
     details: str | None = None,
     variant_instructions: str | None = None,
+    base_cost_detail: str | None = None,
 ) -> str:
     """Build the copyable Adventure Log Receipt stored with successful sales."""
     lines = [
@@ -1170,6 +1226,12 @@ def build_sell_receipt(
             f"Item detail: {item_detail}",
             f"Source: {source_with_page(source, page)}",
             f"Base price: {gp(base_price)}",
+        ]
+    )
+    if base_cost_detail:
+        lines.append(f"Base cost resolved: {base_cost_detail}")
+    lines.extend(
+        [
             f"DTP spent: {dtp_cost}",
             f"Gold spent: {gp(gold_cost)}",
         ]
@@ -1989,7 +2051,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         variant_clean = (variant or "").strip() or None
         details_clean = (details or "").strip() or None
-        is_template = is_generic_template_item(sheet_item)
+        is_template = is_generic_template_item(sheet_item) or base_cost_requires_variant(
+            getattr(sheet_item, "base_price_text", "")
+        )
 
         if variant_clean and not is_template:
             await interaction.response.send_message(
@@ -2000,6 +2064,14 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         if details_clean and not is_template and looks_like_pasted_detail_text(details_clean):
             await interaction.response.send_message(
                 "Use only the item name in the item field. The bot already knows the item data. Put only custom notes in details.",
+                ephemeral=True,
+            )
+            return None
+
+        base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant_clean)
+        if base_cost_resolution.base_price is None:
+            await interaction.response.send_message(
+                base_cost_error_text(sheet_item, base_cost_resolution),
                 ephemeral=True,
             )
             return None
@@ -2018,11 +2090,15 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         )
         if variant_note:
             variant_lines.append(f"* {variant_note}")
+        if sheet_item.base_price is None and base_cost_resolution.detail:
+            variant_lines.append(f"* Base cost resolved: {base_cost_resolution.detail}")
 
         return {
             "sheet_item": sheet_item,
             "variant_clean": variant_clean,
             "details_clean": details_clean,
+            "base_price": int(base_cost_resolution.base_price),
+            "base_cost_detail": base_cost_resolution.detail if sheet_item.base_price is None else "",
             "variant_block": ("\n" + "\n".join(variant_lines)) if variant_lines else "",
             "listing_name": resolved_listing_name(sheet_item.name, variant_clean),
             "seller": interaction.user.mention,
@@ -2074,7 +2150,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             page=sheet_item.page or None,
             min_apl=sheet_item.min_apl,
             minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
-            base_price=sheet_item.base_price,
+            base_price=context["base_price"],
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
             rules_text=sheet_item.rules_text or None,
@@ -2114,7 +2190,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         for sheet_item in self.bot.sheet_cache.items:
             if not sheet_item.allowed or sheet_item.loot_type != "Item":
                 continue
-            if sheet_item.base_price is None:
+            if not item_has_dwarfy_base_cost(sheet_item):
                 continue
             key = sheet_item.name.casefold().strip()
             if key in seen:
@@ -2193,16 +2269,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return None
-        if sheet_item.base_price is None:
-            await interaction.response.send_message(
-                f"`{sheet_item.name}` does not have a Base Price in the sheet and cannot be stocked for Dwarfy sales.",
-                ephemeral=True,
-            )
-            return None
 
         variant_clean = (variant or "").strip() or None
         notes_clean = (notes or "").strip() or None
-        is_template = is_generic_template_item(sheet_item)
+        is_template = is_generic_template_item(sheet_item) or base_cost_requires_variant(
+            getattr(sheet_item, "base_price_text", "")
+        )
         if variant_clean and not is_template:
             await interaction.response.send_message(
                 "Variant is only used for generic/template items. This item is already specific.",
@@ -2216,11 +2288,21 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return None
 
+        base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant_clean)
+        if base_cost_resolution.base_price is None:
+            await interaction.response.send_message(
+                base_cost_error_text(sheet_item, base_cost_resolution),
+                ephemeral=True,
+            )
+            return None
+
         return {
             "sheet_item": sheet_item,
             "variant_clean": variant_clean,
             "notes_clean": notes_clean,
             "listing_name": resolved_listing_name(sheet_item.name, variant_clean),
+            "base_price": int(base_cost_resolution.base_price),
+            "base_cost_detail": base_cost_resolution.detail if sheet_item.base_price is None else "",
         }
 
     async def _resolve_classified_context(
@@ -2273,7 +2355,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return None
         variant_clean = (variant or "").strip() or None
         details_clean = (details or "").strip() or None
-        is_template = is_generic_template_item(sheet_item)
+        is_template = is_generic_template_item(sheet_item) or base_cost_requires_variant(
+            getattr(sheet_item, "base_price_text", "")
+        )
         if variant_clean and not is_template:
             await interaction.response.send_message(
                 "Variant is only used for generic/template items. This item is already specific.",
@@ -2310,6 +2394,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         variant: str | None,
         notes: str | None,
         cost_basis: int,
+        base_price: int,
         batch_id: str,
     ) -> dict[str, Any]:
         """Create a Dwarfy-owned stock listing."""
@@ -2339,7 +2424,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             page=sheet_item.page or None,
             min_apl=sheet_item.min_apl,
             minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
-            base_price=sheet_item.base_price,
+            base_price=base_price,
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
             rules_text=sheet_item.rules_text or None,
@@ -2400,7 +2485,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         sheet_item = context["sheet_item"]
-        default_cost_basis = direct_sell_price(sheet_item.base_price).seller_payout
+        base_price = context["base_price"]
+        default_cost_basis = direct_sell_price(base_price).seller_payout
         final_cost_basis = default_cost_basis if cost_basis is None else int(cost_basis)
         batch_id = new_stock_batch_id()
         rows: list[dict[str, Any]] = []
@@ -2413,6 +2499,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                     variant=context["variant_clean"],
                     notes=context["notes_clean"],
                     cost_basis=final_cost_basis,
+                    base_price=base_price,
                     batch_id=batch_id,
                 )
             )
@@ -2425,6 +2512,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Rarity: {sheet_item.rarity}\n"
             f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
             f"Source: {source_with_page(sheet_item.source, sheet_item.page)}\n"
+            f"Base price: {gp(base_price)}\n"
+            f"{('Base cost resolved: ' + context['base_cost_detail'] + chr(10)) if context['base_cost_detail'] else ''}"
             f"Cost basis each: {gp(final_cost_basis)}\n"
             f"Batch: {batch_id}\n"
             f"Listings: {listing_ids}"
@@ -2606,13 +2695,22 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
             selection = pick_weighted_item(final_pool)
             sheet_item = selection.item
+            listing_name, variant, variant_note = resolve_random_stock_identity(sheet_item)
+            base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant)
+            if base_cost_resolution.base_price is None:
+                slot_type = "Consumable" if consumable else "Permanent"
+                audit_lines.append(
+                    f"{slot_type} {index}: d100 {d100} -> {rolled_rarity} -> skipped, {sheet_item.name} could not resolve Base Cost."
+                )
+                return
             if not consumable:
                 selected_permanent_names.add(sheet_item.name.casefold())
-            cost_basis = direct_sell_price(sheet_item.base_price).seller_payout
-            listing_name, variant, variant_note = resolve_random_stock_identity(sheet_item)
+            cost_basis = direct_sell_price(base_cost_resolution.base_price).seller_payout
             stock_note = f"Random owner stock batch {batch_id}."
             if variant_note:
                 stock_note = f"{stock_note} {variant_note}"
+            if sheet_item.base_price is None and base_cost_resolution.detail:
+                stock_note = f"{stock_note} Base cost resolved: {base_cost_resolution.detail}."
             row = await self._create_owner_stock_listing(
                 interaction,
                 sheet_item=sheet_item,
@@ -2620,6 +2718,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 variant=variant,
                 notes=stock_note,
                 cost_basis=cost_basis,
+                base_price=int(base_cost_resolution.base_price),
                 batch_id=batch_id,
             )
             created.append(row)
@@ -2710,7 +2809,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         sheet_item = context["sheet_item"]
-        sale = direct_sell_price(sheet_item.base_price)
+        sale = direct_sell_price(context["base_price"])
         receipt_preview = build_sell_receipt(
             activity="Sell Magic Item directly to Dwarfy's Shop",
             character=character,
@@ -2727,6 +2826,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             page=sheet_item.page,
             minimum_tier=sheet_item_minimum_tier_text(sheet_item),
             base_price=sale.base_price,
+            base_cost_detail=context["base_cost_detail"],
             dtp_cost=0,
             gold_cost=0,
             seller_payout=sale.seller_payout,
@@ -2762,6 +2862,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Result: {sale.result_text}\n"
             f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
             f"Base price: {gp(sale.base_price)}\n"
+            f"{('Base cost resolved: ' + context['base_cost_detail'] + chr(10)) if context['base_cost_detail'] else ''}"
             f"Seller payout: {gp(sale.seller_payout)}\n"
             f"Dwarfy's cost basis: {gp(sale.seller_payout)}\n"
             "Future sale price: rolled when purchased; Dwarfy normally keeps his cost-basis floor except on a natural 20 haggling roll\n"
@@ -2801,7 +2902,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         sheet_item = context["sheet_item"]
-        broker_roll = roll_broker_price(sheet_item.base_price)
+        broker_roll = roll_broker_price(context["base_price"])
         declaration = (
             f"{context['seller']} declares that {context['seller_character']} owns {context['listing_name']} "
             "and spends 5 DTP and 25gp to broker it through Dwarfy's Shop."
@@ -2824,6 +2925,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 page=sheet_item.page,
                 minimum_tier=sheet_item_minimum_tier_text(sheet_item),
                 base_price=broker_roll.base_price,
+                base_cost_detail=context["base_cost_detail"],
                 dtp_cost=5,
                 gold_cost=25,
                 roll_label="Broker roll",
@@ -2844,6 +2946,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 f"Result: {broker_roll.result_text}\n"
                 f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
                 f"Base price: {gp(broker_roll.base_price)}\n"
+                f"{('Base cost resolved: ' + context['base_cost_detail'] + chr(10)) if context['base_cost_detail'] else ''}"
                 "Seller payout: 0gp\n"
                 "Dwarfy's cost basis: 0gp\n"
                 "Inventory status: Not added to Dwarfy inventory\n"
@@ -2873,6 +2976,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             page=sheet_item.page,
             minimum_tier=sheet_item_minimum_tier_text(sheet_item),
             base_price=broker_roll.base_price,
+            base_cost_detail=context["base_cost_detail"],
             dtp_cost=5,
             gold_cost=25,
             roll_label="Broker roll",
@@ -2911,6 +3015,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Result: {broker_roll.result_text}\n"
             f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
             f"Base price: {gp(broker_roll.base_price)}\n"
+            f"{('Base cost resolved: ' + context['base_cost_detail'] + chr(10)) if context['base_cost_detail'] else ''}"
             f"Seller payout: {gp(broker_roll.seller_payout)}\n"
             f"Dwarfy's cost basis: {gp(broker_roll.seller_payout)}\n"
             "Future sale price: rolled when purchased; Dwarfy normally keeps his cost-basis floor except on a natural 20 haggling roll\n"
