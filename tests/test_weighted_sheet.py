@@ -1431,6 +1431,37 @@ class MatchingAndDwarfyTests(unittest.TestCase):
             ["Longsword", "Longbow"],
         )
 
+    def test_formula_base_cost_generates_variant_autocomplete(self):
+        cache = make_cache([
+            item("Enspelled Armor", base_price=None, base_price_text="400 GP (plus cost of armor)"),
+            item("Enspelled Weapon", base_price=None, base_price_text="400 GP (plus cost of weapon)"),
+            item("Slaying Ammunition", consumable=True, base_price=None, base_price_text="2000 GP (plus cost of 10x ammunition)"),
+        ])
+
+        self.assertIn(
+            "Breastplate",
+            cache.autocomplete_variant_options(item_name="Enspelled Armor", query="breast"),
+        )
+        self.assertIn(
+            "Longsword",
+            cache.autocomplete_variant_options(item_name="Enspelled Weapon", query="long"),
+        )
+        self.assertEqual(
+            cache.autocomplete_variant_options(item_name="Slaying Ammunition", query="arrow", for_sell=False),
+            ["20 arrows"],
+        )
+
+    def test_variant_autocomplete_aggregates_duplicate_item_rows(self):
+        cache = make_cache([
+            item("Armor of Resistance", base_price=None, base_price_text="400 GP (plus cost of armor)"),
+            item("Armor of Resistance", base_price=None, base_price_text="600 GP (plus cost of armor)", min_apl=5),
+        ])
+
+        options = cache.autocomplete_variant_options(item_name="Armor of Resistance", query="plate")
+
+        self.assertIn("Plate Armor", options)
+        self.assertIn("Half Plate", options)
+
     def test_pasted_item_text_is_rejected_but_parentheses_names_are_allowed(self):
         from services.sheets import looks_like_pasted_detail_text, looks_like_pasted_item_text
 

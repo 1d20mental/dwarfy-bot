@@ -126,6 +126,32 @@ GROUP_COSTS = {
     "instrument": GEAR_COSTS_GP,
 }
 
+SUGGESTED_AMMUNITION_VARIANTS = ("20 arrows", "20 bolts", "10 bullets")
+SUGGESTED_WEAPON_VARIANTS = (
+    "Longsword",
+    "Rapier",
+    "Shortsword",
+    "Scimitar",
+    "Battleaxe",
+    "Warhammer",
+    "Longbow",
+    "Shortbow",
+    "Light Crossbow",
+    "Heavy Crossbow",
+)
+SUGGESTED_ARMOR_VARIANTS = (
+    "Leather Armor",
+    "Studded Leather Armor",
+    "Chain Shirt",
+    "Scale Mail",
+    "Breastplate",
+    "Half Plate",
+    "Chain Mail",
+    "Splint Armor",
+    "Plate Armor",
+)
+SUGGESTED_SHIELD_VARIANTS = ("Shield",)
+
 LEADING_GP_RE = re.compile(
     r"^\s*(?P<amount>\d[\d,]*(?:\.\d+)?)\s*(?:gp|gold)?\b(?P<rest>.*)$",
     re.IGNORECASE,
@@ -251,6 +277,21 @@ def base_cost_variant_groups(value: object) -> tuple[str, ...]:
 
 def base_cost_requires_variant(value: object) -> bool:
     return bool(base_cost_variant_groups(value))
+
+
+def suggested_variants_for_base_cost(value: object) -> tuple[str, ...]:
+    """Return useful Discord autocomplete variants for a Base Cost formula."""
+    suggestions: list[str] = []
+    for group in base_cost_variant_groups(value):
+        if group == "ammunition":
+            suggestions.extend(SUGGESTED_AMMUNITION_VARIANTS)
+        elif group == "shield":
+            suggestions.extend(SUGGESTED_SHIELD_VARIANTS)
+        elif group == "armor":
+            suggestions.extend(SUGGESTED_ARMOR_VARIANTS)
+        elif group == "weapon":
+            suggestions.extend(SUGGESTED_WEAPON_VARIANTS)
+    return tuple(dict.fromkeys(suggestions))
 
 
 def _extract_quantity(text: str) -> int | None:

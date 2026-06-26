@@ -2205,21 +2205,11 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         return (starts + contains)[:25]
 
     def _stock_variant_options(self, item_name: str, current: str) -> list[str]:
-        match = self.bot.sheet_cache.match_item(item_name, for_sell=False)
-        if match.item is None:
-            return []
-        query_norm = current.casefold().strip()
-        options: list[str] = []
-        seen: set[str] = set()
-        for option in match.item.variant_option_list:
-            key = option.casefold()
-            if key in seen:
-                continue
-            if query_norm and query_norm not in key:
-                continue
-            seen.add(key)
-            options.append(option)
-        return options[:25]
+        return self.bot.sheet_cache.autocomplete_variant_options(
+            item_name=item_name,
+            query=current,
+            for_sell=False,
+        )
 
     async def _resolve_stock_context(
         self,

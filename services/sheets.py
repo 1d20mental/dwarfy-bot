@@ -13,7 +13,11 @@ from typing import Iterable
 import gspread
 from google.oauth2.service_account import Credentials
 
-from services.equipment import base_cost_has_price_signal, parse_static_base_price
+from services.equipment import (
+    base_cost_has_price_signal,
+    parse_static_base_price,
+    suggested_variants_for_base_cost,
+)
 
 
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -801,23 +805,44 @@ class SheetCache:
         item_name: str,
         query: str,
         limit: int = 25,
+        for_sell: bool = True,
     ) -> list[str]:
-        """Return suggested variants from the selected item's Variant Options."""
-        match = self.match_item(item_name, for_sell=True)
-        if match.item is None:
+        """Return suggested variants for the selected item.
+
+        Duplicate sheet rows often share a clean item name across APL or roll
+        bands, so collect options by exact item name instead of relying on one
+        canonical match.
+        """
+        item_norm = item_name.casefold().strip()
+        if not item_norm:
             return []
 
+        candidates = [
+            item
+            for item in self.items
+            if item.name.casefold().strip() == item_norm
+        ]
+        if not candidates:
+            match = self.match_item(item_name, for_sell=for_sell)
+            candidates = [match.item] if match.item is not None else []
+
         query_norm = query.casefold().strip()
-        options = []
+        options: list[str] = []
         seen: set[str] = set()
-        for option in match.item.variant_option_list:
-            key = option.casefold()
-            if key in seen:
+        for item in candidates:
+            if item is None or not item.allowed or item.loot_type != "Item":
                 continue
-            if query_norm and query_norm not in key:
-                continue
-            seen.add(key)
-            options.append(option)
+            if for_sell:
+                if item.consumable or item.dwarfy_sell_eligible is False or not item_has_dwarfy_base_cost(item):
+                    continue
+            for option in item.variant_option_list + suggested_variants_for_base_cost(item.base_price_text):
+                key = option.casefold().strip()
+                if not key or key in seen:
+                    continue
+                if query_norm and query_norm not in key:
+                    continue
+                seen.add(key)
+                options.append(option)
         return options[:limit]
 
     def loot_pool(self, *, rarity: str, consumable: bool, apl: int) -> list[SheetItem]:
