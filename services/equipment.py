@@ -38,6 +38,9 @@ class MundaneItem:
     cost_base_required: bool = False
     cost_base_group_required: str = ""
     eligible_as_magic_variant_base: bool = True
+    attack_type: str = ""
+    damage_type: str = ""
+    properties: str = ""
 
 
 @dataclass(frozen=True)
@@ -191,6 +194,55 @@ SUGGESTED_ARMOR_VARIANTS = (
     "Plate Armor",
 )
 SUGGESTED_SHIELD_VARIANTS = ("Shield",)
+
+WEAPON_PROFILES = {
+    "battleaxe": ("melee", ("slashing",)),
+    "blowgun": ("ranged", ("piercing",)),
+    "club": ("melee", ("bludgeoning",)),
+    "dagger": ("melee", ("piercing",)),
+    "dart": ("ranged", ("piercing",)),
+    "double bladed scimitar": ("melee", ("slashing",)),
+    "flail": ("melee", ("bludgeoning",)),
+    "glaive": ("melee", ("slashing",)),
+    "greataxe": ("melee", ("slashing",)),
+    "greatclub": ("melee", ("bludgeoning",)),
+    "greatsword": ("melee", ("slashing",)),
+    "halberd": ("melee", ("slashing",)),
+    "hand crossbow": ("ranged", ("piercing",)),
+    "handaxe": ("melee", ("slashing",)),
+    "heavy crossbow": ("ranged", ("piercing",)),
+    "javelin": ("melee", ("piercing",)),
+    "lance": ("melee", ("piercing",)),
+    "light crossbow": ("ranged", ("piercing",)),
+    "light hammer": ("melee", ("bludgeoning",)),
+    "longbow": ("ranged", ("piercing",)),
+    "longsword": ("melee", ("slashing",)),
+    "mace": ("melee", ("bludgeoning",)),
+    "maul": ("melee", ("bludgeoning",)),
+    "morningstar": ("melee", ("piercing",)),
+    "musket": ("ranged", ("piercing",)),
+    "net": ("ranged", ()),
+    "pike": ("melee", ("piercing",)),
+    "pistol": ("ranged", ("piercing",)),
+    "quarterstaff": ("melee", ("bludgeoning",)),
+    "rapier": ("melee", ("piercing",)),
+    "rifle": ("ranged", ("piercing",)),
+    "scimitar": ("melee", ("slashing",)),
+    "shortbow": ("ranged", ("piercing",)),
+    "shortsword": ("melee", ("piercing",)),
+    "sickle": ("melee", ("slashing",)),
+    "sling": ("ranged", ("bludgeoning",)),
+    "spear": ("melee", ("piercing",)),
+    "trident": ("melee", ("piercing",)),
+    "war pick": ("melee", ("piercing",)),
+    "warhammer": ("melee", ("bludgeoning",)),
+    "whip": ("melee", ("slashing",)),
+    "yklwa": ("melee", ("piercing",)),
+}
+
+RANGED_WEAPON_WORDS = ("bow", "crossbow", "blowgun", "sling", "firearm", "pistol", "musket", "rifle")
+DAMAGE_TYPES = ("bludgeoning", "piercing", "slashing")
+ATTACK_TYPES = ("melee", "ranged")
 
 LEADING_GP_RE = re.compile(
     r"^\s*(?P<amount>\d[\d,]*(?:\.\d+)?)\s*(?:gp|gold)?\b(?P<rest>.*)$",
@@ -412,6 +464,9 @@ def _mundane_group_set(item: MundaneItem) -> set[str]:
             item.category,
             item.lookup_key,
             item.item_name,
+            item.attack_type,
+            item.damage_type,
+            item.properties,
         )
     ).casefold()
     groups: set[str] = set()
@@ -423,7 +478,124 @@ def _mundane_group_set(item: MundaneItem) -> set[str]:
     return groups
 
 
-def _allowed_group_sets(rule: PricingTemplateRule | None, base_price_text: str) -> tuple[set[str], set[str], set[str]]:
+def _profile_from_key(value: str) -> tuple[str | None, set[str]]:
+    key = normalize_lookup_key(value)
+    profile = WEAPON_PROFILES.get(key)
+    if profile is None:
+        return None, set()
+    mode, damage_types = profile
+    return mode, set(damage_types)
+
+
+def _weapon_profile(item: MundaneItem) -> tuple[set[str], set[str]]:
+    """Return attack modes and damage types for a mundane weapon variant.
+
+    The Google Sheet can grow explicit columns later, but the current reference
+    mostly gives us item names. This fallback map prevents broad "weapon" rules
+    from accepting variants that violate parentheticals like "melee" or
+    "piercing or slashing."
+    """
+    groups = _mundane_group_set(item)
+    text = _addon_norm(
+        " ".join(
+            (
+                item.item_name,
+                item.lookup_key,
+                item.category,
+                item.variant_group,
+                item.cost_base_group_required,
+                item.attack_type,
+                item.damage_type,
+                item.properties,
+            )
+        )
+    )
+    modes: set[str] = set()
+    damage_types: set[str] = set()
+
+    for field in (item.item_name, item.lookup_key):
+        mode, damages = _profile_from_key(field)
+        if mode:
+            modes.add(mode)
+            damage_types.update(damages)
+
+    for mode in ATTACK_TYPES:
+        if re.search(rf"\b{mode}\b", text):
+            modes.add(mode)
+    for damage_type in DAMAGE_TYPES:
+        if re.search(rf"\b{damage_type}\b", text):
+            damage_types.add(damage_type)
+
+    if "firearm" in groups:
+        modes.add("ranged")
+        damage_types.add("piercing")
+    if "ammunition" in groups:
+        modes.add("ranged")
+        if any(word in text for word in ("arrow", "bolt", "needle")):
+            damage_types.add("piercing")
+        elif "bullet" in text:
+            damage_types.add("bludgeoning")
+
+    if not modes and any(word in text for word in RANGED_WEAPON_WORDS):
+        modes.add("ranged")
+    return modes, damage_types
+
+
+def _variant_constraint_text(
+    *,
+    rule: PricingTemplateRule | None,
+    base_price_text: str,
+    item: object | None,
+) -> str:
+    parts = [base_price_text]
+    if rule:
+        parts.extend(
+            [
+                rule.rule_key,
+                rule.bot_item_name_pattern,
+                rule.allowed_variant_groups,
+                rule.example_variant,
+                rule.notes,
+            ]
+        )
+    if item is not None:
+        parts.extend(
+            [
+                getattr(item, "name", ""),
+                getattr(item, "variant_type", ""),
+                getattr(item, "variant_instructions", ""),
+                getattr(item, "variant_options", ""),
+                getattr(item, "tags_text", ""),
+                getattr(item, "item_tags", ""),
+                getattr(item, "notes", ""),
+            ]
+        )
+    return _addon_norm(" ".join(_clean(part) for part in parts if _clean(part)))
+
+
+def _required_attack_modes(text: str) -> set[str]:
+    modes = {mode for mode in ATTACK_TYPES if re.search(rf"\b{mode}\b", text)}
+    return modes if "weapon" in text or "firearm" in text or "ammunition" in text else set()
+
+
+def _required_damage_types(text: str) -> set[str]:
+    damage_types = {damage_type for damage_type in DAMAGE_TYPES if re.search(rf"\b{damage_type}\b", text)}
+    return damage_types if "weapon" in text or "firearm" in text or "ammunition" in text else set()
+
+
+def _format_or(values: set[str]) -> str:
+    ordered = [value for value in (*ATTACK_TYPES, *DAMAGE_TYPES) if value in values]
+    if not ordered:
+        ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    return " or ".join([", ".join(ordered[:-1]), ordered[-1]]) if len(ordered) > 2 else " or ".join(ordered)
+
+
+def _allowed_group_sets(
+    rule: PricingTemplateRule | None,
+    base_price_text: str,
+) -> tuple[set[str], set[str], set[str]]:
     """Return allowed groups, excluded groups, and excluded normalized names."""
     raw = _clean(rule.allowed_variant_groups if rule else "").casefold()
     allowed: set[str] = set()
@@ -469,6 +641,7 @@ def _is_variant_allowed(
     *,
     rule: PricingTemplateRule | None,
     base_price_text: str,
+    item: object | None = None,
 ) -> tuple[bool, str]:
     allowed, excluded_groups, excluded_names = _allowed_group_sets(rule, base_price_text)
     groups = _mundane_group_set(mundane)
@@ -482,6 +655,18 @@ def _is_variant_allowed(
         return False, f"{mundane.item_name} is a {group_text} variant, which this template excludes."
     if allowed and not (groups & allowed):
         return False, f"{mundane.item_name} is {mundane.variant_group or mundane.category}, but this template requires {', '.join(sorted(allowed))}."
+
+    constraint_text = _variant_constraint_text(rule=rule, base_price_text=base_price_text, item=item)
+    required_modes = _required_attack_modes(constraint_text)
+    required_damage_types = _required_damage_types(constraint_text)
+    if required_modes or required_damage_types:
+        modes, damage_types = _weapon_profile(mundane)
+        if required_modes and not (modes & required_modes):
+            actual = _format_or(modes) if modes else "unknown attack type"
+            return False, f"{mundane.item_name} is {actual}, but this template requires {_format_or(required_modes)}."
+        if required_damage_types and not (damage_types & required_damage_types):
+            actual = _format_or(damage_types) if damage_types else "unknown damage"
+            return False, f"{mundane.item_name} deals {actual} damage, but this template requires {_format_or(required_damage_types)}."
     return True, ""
 
 
@@ -577,7 +762,7 @@ def resolve_reference_base_cost(
     if mundane is None:
         return BaseCostResolution(None, error=error, needs_variant=True, recognized=True)
 
-    allowed, allowed_error = _is_variant_allowed(mundane, rule=rule, base_price_text=base_price_text)
+    allowed, allowed_error = _is_variant_allowed(mundane, rule=rule, base_price_text=base_price_text, item=item)
     if not allowed:
         return BaseCostResolution(None, error=allowed_error, needs_variant=True, recognized=True)
 
@@ -647,22 +832,19 @@ def suggested_variants_from_reference(
 ) -> list[str]:
     """Suggest variant names from Mundane Item Reference for a Bot Item."""
     rule = pricing_rule_for_item(getattr(item, "name", ""), pricing_rules)
-    allowed_groups, excluded_groups, excluded_names = _allowed_group_sets(
-        rule,
-        getattr(item, "base_price_text", ""),
-    )
     query_norm = normalize_lookup_key(query)
     suggestions: list[str] = []
     seen: set[str] = set()
     for mundane in mundane_items:
         if not mundane.eligible_as_magic_variant_base:
             continue
-        groups = _mundane_group_set(mundane)
-        if groups & excluded_groups:
-            continue
-        if allowed_groups and not (groups & allowed_groups):
-            continue
-        if normalize_lookup_key(mundane.item_name) in excluded_names or normalize_lookup_key(mundane.lookup_key) in excluded_names:
+        allowed, _error = _is_variant_allowed(
+            mundane,
+            rule=rule,
+            base_price_text=getattr(item, "base_price_text", ""),
+            item=item,
+        )
+        if not allowed:
             continue
         key = normalize_lookup_key(mundane.item_name)
         if not key or key in seen:

@@ -302,6 +302,14 @@ def _cell(row: list[str], headers: dict[str, int], column: str) -> str:
     return _clean(row[index])
 
 
+def _first_cell(row: list[str], headers: dict[str, int], columns: tuple[str, ...]) -> str:
+    for column in columns:
+        value = _cell(row, headers, column)
+        if value:
+            return value
+    return ""
+
+
 def _first_header(headers: dict[str, int], columns: tuple[str, ...]) -> str | None:
     for column in columns:
         if _has_header(headers, column):
@@ -749,6 +757,9 @@ class SheetCache:
                         _cell(row, headers, "Eligible as Magic Variant Base"),
                         default=True,
                     ),
+                    attack_type=_first_cell(row, headers, ("Attack Type", "Weapon Range", "Range Type")),
+                    damage_type=_first_cell(row, headers, ("Damage Type", "Damage")),
+                    properties=_first_cell(row, headers, ("Properties", "Weapon Properties")),
                 )
             )
         return items
@@ -943,7 +954,8 @@ class SheetCache:
                     limit=limit,
                 )
             )
-            for option in item.variant_option_list + reference_options + suggested_variants_for_base_cost(item.base_price_text):
+            base_cost_options = () if self.mundane_items else suggested_variants_for_base_cost(item.base_price_text)
+            for option in item.variant_option_list + reference_options + base_cost_options:
                 key = option.casefold().strip()
                 if not key or key in seen:
                     continue

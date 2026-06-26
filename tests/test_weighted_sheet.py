@@ -1610,7 +1610,7 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         )
         cache = make_cache(
             [row],
-            mundane_items=[mundane("Longsword", "weapon", 15)],
+            mundane_items=[mundane("Longsword", "weapon", 15), mundane("20 arrows", "ammunition", 1)],
             pricing_rules=[
                 pricing_rule(
                     "Silvered Weapon (any melee)",
@@ -1623,10 +1623,81 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         )
 
         result = cache.resolve_base_cost_for_item(row, "Longsword")
+        arrows = cache.resolve_base_cost_for_item(row, "20 arrows")
 
         self.assertEqual(result.base_price, 115)
         self.assertEqual(result.craft_cost_gp, Decimal("57.5"))
         self.assertEqual(result.craft_cost_dtp, 5)
+        self.assertIsNone(arrows.base_price)
+        self.assertIn("requires melee", arrows.error)
+
+    def test_reference_pricing_enforces_melee_and_damage_parenthetical(self):
+        row = item(
+            "Piercer (any piercing or slashing melee weapon)",
+            base_price=None,
+            base_price_text="400 GP (plus cost of weapon)",
+            variant_type="Template",
+            tags=("weapon (any piercing or slashing melee weapon)",),
+        )
+        cache = make_cache(
+            [row],
+            mundane_items=[
+                mundane("Rapier", "weapon", 25),
+                mundane("Battleaxe", "weapon", 10),
+                mundane("Longbow", "weapon", 50),
+                mundane("Maul", "weapon", 10),
+            ],
+            pricing_rules=[
+                pricing_rule(
+                    "Piercer (any piercing or slashing melee weapon)",
+                    groups="weapon, firearm",
+                    surcharge=400,
+                )
+            ],
+        )
+
+        rapier = cache.resolve_base_cost_for_item(row, "Rapier")
+        battleaxe = cache.resolve_base_cost_for_item(row, "Battleaxe")
+        longbow = cache.resolve_base_cost_for_item(row, "Longbow")
+        maul = cache.resolve_base_cost_for_item(row, "Maul")
+
+        self.assertEqual(rapier.base_price, 425)
+        self.assertEqual(battleaxe.base_price, 410)
+        self.assertIsNone(longbow.base_price)
+        self.assertIn("requires melee", longbow.error)
+        self.assertIsNone(maul.base_price)
+        self.assertIn("requires piercing or slashing", maul.error)
+
+    def test_variant_autocomplete_enforces_melee_and_damage_parenthetical(self):
+        row = item(
+            "Piercer (any piercing or slashing melee weapon)",
+            base_price=None,
+            base_price_text="400 GP (plus cost of weapon)",
+            variant_type="Template",
+        )
+        cache = make_cache(
+            [row],
+            mundane_items=[
+                mundane("Rapier", "weapon", 25),
+                mundane("Battleaxe", "weapon", 10),
+                mundane("Longbow", "weapon", 50),
+                mundane("Maul", "weapon", 10),
+            ],
+            pricing_rules=[
+                pricing_rule(
+                    "Piercer (any piercing or slashing melee weapon)",
+                    groups="weapon, firearm",
+                    surcharge=400,
+                )
+            ],
+        )
+
+        options = cache.autocomplete_variant_options(
+            item_name="Piercer (any piercing or slashing melee weapon)",
+            query="",
+        )
+
+        self.assertEqual(options, ["Rapier", "Battleaxe"])
 
     def test_reference_pricing_barding_chain_mail(self):
         row = item(
