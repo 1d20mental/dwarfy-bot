@@ -183,7 +183,7 @@ class SheetParsingTests(unittest.TestCase):
             creature_type=None,
         )
 
-        self.assertIn("Source: HGtMH", output)
+        self.assertIn("Source: **HGtMH**", output)
         self.assertNotIn("hgtmh", output)
 
 
@@ -364,10 +364,11 @@ class WeightedSelectionTests(unittest.TestCase):
         with patch("services.loot.random.randint", side_effect=rolls):
             output = build_session_loot_output(cache=cache, players=7, apl=9)
 
-        for label in ("Permanent 1:", "Permanent 2:", "Permanent 3:", "Consumable 1:", "Consumable 2:", "Consumable 3:", "Consumable 4:"):
+        for label in ("**Permanent 1**", "**Permanent 2**", "**Permanent 3**", "**Consumable 1**", "**Consumable 2**", "**Consumable 3**", "**Consumable 4**"):
             self.assertIn(label, output)
-        self.assertIn("Permanent 1: 10 -> Common, fallback to Uncommon -> Fallback Permanent", output)
-        self.assertIn("Consumable 4:", output)
+        self.assertIn("Roll: `10` -> **Common** (fallback to **Uncommon**)", output)
+        self.assertIn("Item: **Fallback Permanent**", output)
+        self.assertIn("**Consumable 4**", output)
         self.assertNotIn("NO MATCH FOUND", output)
 
     def test_staff_review_does_not_attempt_weighted_roll(self):
@@ -409,15 +410,15 @@ class MonsterComponentTests(unittest.TestCase):
 
         output = self.format_monster(row)
 
-        self.assertIn("Creature Type: Beast", output)
-        self.assertIn("Component Roll: 63", output)
+        self.assertIn("Creature Type: **Beast**", output)
+        self.assertIn("Component Roll: `63`", output)
 
     def test_monster_component_uses_command_override(self):
         row = item("Monster Component Parcel", consumable=True, loot_type="Monster Component", creature_type="Beast")
 
         output = self.format_monster(row, creature_type="Aberration")
 
-        self.assertIn("Creature Type: Aberration", output)
+        self.assertIn("Creature Type: **Aberration**", output)
 
     def test_monster_component_falls_back_to_random_creature_type(self):
         row = item("Monster Component Parcel", consumable=True, loot_type="Monster Component", creature_type="")
@@ -425,7 +426,7 @@ class MonsterComponentTests(unittest.TestCase):
         with patch("services.sheets.random.choice", return_value="Beast"):
             output = self.format_monster(row)
 
-        self.assertIn("Creature Type: Beast", output)
+        self.assertIn("Creature Type: **Beast**", output)
 
 
 class DwarfySaleMechanicTests(unittest.TestCase):

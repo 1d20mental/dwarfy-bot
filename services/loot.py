@@ -302,9 +302,9 @@ def select_loot_item(
 
 def _weighted_audit_line(selection: WeightedSelection) -> str:
     return (
-        f"Eligible entries: {selection.eligible_entry_count} | "
-        f"Total weight: {selection.total_weight} | "
-        f"Weighted item roll: {selection.ticket}/{selection.total_weight}"
+        f"Pool: {selection.eligible_entry_count} eligible entries | "
+        f"Total weight {selection.total_weight} | "
+        f"Weighted ticket {selection.ticket}/{selection.total_weight}"
     )
 
 
@@ -324,6 +324,22 @@ def _slot_heading(slot: LootSlot, item_name: str) -> str:
     return f"{slot.label}: {slot.d100} -> {slot.rarity} -> {item_name}"
 
 
+def _slot_roll_line(slot: LootSlot) -> str:
+    """Return a compact, scannable roll line for one loot slot."""
+    selected_rarity = slot.selected_rarity or slot.rarity
+    if selected_rarity != slot.rarity:
+        return f"Roll: `{slot.d100}` -> **{slot.rarity}** (fallback to **{selected_rarity}**)"
+    return f"Roll: `{slot.d100}` -> **{slot.rarity}**"
+
+
+def _item_detail_lines(*, source: str, tags: str) -> list[str]:
+    """Return item source/tag detail lines with consistent emphasis."""
+    return [
+        f"Source: **{source}**",
+        f"Tags: {tags}",
+    ]
+
+
 def _format_item_slot(
     *,
     cache: SheetCache,
@@ -335,11 +351,15 @@ def _format_item_slot(
     if slot.selection is None:
         if slot.staff_review_reason:
             return (
-                f"{slot.label}: {slot.d100} -> {slot.rarity} -> STAFF REVIEW NEEDED\n"
+                f"**{slot.label}**\n"
+                f"{_slot_roll_line(slot)}\n"
+                "Item: **STAFF REVIEW NEEDED**\n"
                 "This slot could not be filled from the current sheet. Staff should check the bot logs and sheet filters."
             )
         return (
-            f"{slot.label}: {slot.d100} -> {slot.rarity} -> STAFF REVIEW NEEDED\n"
+            f"**{slot.label}**\n"
+            f"{_slot_roll_line(slot)}\n"
+            "Item: **STAFF REVIEW NEEDED**\n"
             "This slot could not be filled from the current sheet."
         )
 
@@ -350,18 +370,20 @@ def _format_item_slot(
             component = cache.roll_monster_component(selected_creature_type)
         except (RuntimeError, ValueError) as exc:
             return (
-                f"{_slot_heading(slot, 'Monster Component')}\n"
+                f"**{slot.label}**\n"
+                f"{_slot_roll_line(slot)}\n"
+                "Item: **Monster Component**\n"
                 f"{_weighted_audit_line(slot.selection)}\n"
                 f"Reason: {exc}"
             )
         component_roll = component.d100 if component.d100 is not None else "random"
         lines = [
-            _slot_heading(slot, "Monster Component"),
+            f"**{slot.label}**",
+            _slot_roll_line(slot),
+            "Item: **Monster Component**",
             _weighted_audit_line(slot.selection),
-            (
-                f"Creature Type: {component.creature_type} | Component Roll: "
-                f"{component_roll} | Component: {component.component}"
-            ),
+            f"Creature Type: **{component.creature_type}** | Component Roll: `{component_roll}`",
+            f"Component: **{component.component}**",
             f"Examples: {component.examples or 'none'}",
         ]
         if component.note:
@@ -369,10 +391,12 @@ def _format_item_slot(
         return "\n".join(lines)
 
     lines = [
-        _slot_heading(slot, item.name),
+        f"**{slot.label}**",
+        _slot_roll_line(slot),
+        f"Item: **{item.name}**",
         _weighted_audit_line(slot.selection),
-        f"Source: {item.source_with_page} | Tags: {_tags_text(item)}",
     ]
+    lines.extend(_item_detail_lines(source=item.source_with_page, tags=_tags_text(item)))
     lines.extend(_variant_lines(item))
     return "\n".join(lines)
 
@@ -465,26 +489,21 @@ def build_session_loot_output(
         )
 
     lines = [
-        "\U0001F381 Session Loot",
+        "\U0001F381 **Session Loot**",
         "",
-        f"Players: {players}",
-        f"APL: {apl}",
-        f"DMG Tier: {tier_text}",
-        f"Total Slots: {total_slots}",
-        f"Permanent Slots: {permanent_slots}",
-        f"Consumable Slots: {consumable_slots}",
-        f"Tag Filter: {tag_clean or 'none'}",
-        f"Creature Type: {creature_clean or 'random'}",
+        f"**Party:** {players} player{'s' if players != 1 else ''} | APL {apl} | {tier_text}",
+        f"**Slots:** {total_slots} total | {permanent_slots} permanent | {consumable_slots} consumable",
+        f"**Filters:** Tag `{tag_clean or 'none'}` | Creature `{creature_clean or 'random'}`",
         "",
-        "Loot Priority Rolls",
+        "\U0001F3B2 **Loot Priority**",
         "",
     ]
     lines.extend(
-        f"{rank}. Player {player_index}: {roll}"
+        f"{rank}. **Player {player_index}** - {roll}"
         for rank, (player_index, roll) in enumerate(priority_rolls, start=1)
     )
 
-    lines.extend(["", "Permanent Loot"])
+    lines.extend(["", "\U0001F6E1\ufe0f **Permanent Loot**"])
     if permanent:
         for slot in permanent:
             lines.append("")
@@ -500,7 +519,7 @@ def build_session_loot_output(
     else:
         lines.append("No permanent slots for this player count.")
 
-    lines.extend(["", "Consumable Loot"])
+    lines.extend(["", "\U0001F9EA **Consumable Loot**"])
     if consumable:
         for slot in consumable:
             lines.append("")
@@ -517,7 +536,7 @@ def build_session_loot_output(
         lines.append("No consumable slots for this player count.")
 
     if fallback_notes:
-        lines.extend(["", "Tag Fallback Notes"])
+        lines.extend(["", "\U0001F4CC **Tag Fallback Notes**"])
         lines.extend(fallback_notes)
 
     return "\n".join(lines)
