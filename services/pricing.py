@@ -152,12 +152,14 @@ def buy_price_formula(rarity: str) -> str:
 def possible_final_price_range(rarity: str, cost_basis: int) -> tuple[int, int]:
     """Return the lowest and highest possible final buy price.
 
-    The floor rule means the shop never sells below its cost basis.
+    Haggling can reduce the low end by up to 20%, but the floor rule means the
+    shop never sells below its cost basis.
     """
     if rarity not in BUY_PRICE_RANGES:
         raise ValueError(f"Unsupported rarity: {rarity}")
     roll_min, roll_max, _formula = BUY_PRICE_RANGES[rarity]
-    return max(roll_min, cost_basis), max(roll_max, cost_basis)
+    best_discounted_min = (roll_min * 80) // 100
+    return max(best_discounted_min, cost_basis), max(roll_max, cost_basis)
 
 
 def roll_buy_price(rarity: str, cost_basis: int) -> BuyRoll:

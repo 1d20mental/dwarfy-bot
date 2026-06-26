@@ -800,6 +800,10 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         self.assertEqual(result.final_price, 300)
         self.assertTrue(result.cost_basis_floor_applied)
 
+    def test_possible_buy_price_range_includes_best_haggling_discount(self):
+        self.assertEqual(possible_final_price_range("Common", 0), (16, 70))
+        self.assertEqual(possible_final_price_range("Uncommon", 320), (320, 600))
+
     def test_shop_expense_and_dtp_are_not_discounted_in_receipt(self):
         from cogs.dwarfy import build_buy_receipt
 
