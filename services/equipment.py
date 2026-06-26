@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,46 @@ class BaseCostResolution:
     error: str = ""
     needs_variant: bool = False
     recognized: bool = False
+    mundane_item_name: str = ""
+    mundane_lookup_key: str = ""
+    mundane_cost_gp: Decimal | None = None
+    craft_cost_gp: Decimal | None = None
+    craft_cost_dtp: int | None = None
+
+
+@dataclass(frozen=True)
+class MundaneItem:
+    """One row from the Mundane Item Reference tab."""
+
+    lookup_key: str
+    item_name: str
+    category: str = ""
+    variant_group: str = ""
+    cost_gp_raw: str = ""
+    cost_gp: Decimal | None = None
+    cost_mode: str = ""
+    formula_surcharge_gp: Decimal | None = None
+    cost_base_required: bool = False
+    cost_base_group_required: str = ""
+    eligible_as_magic_variant_base: bool = True
+
+
+@dataclass(frozen=True)
+class PricingTemplateRule:
+    """One row from the Pricing Template Rules tab."""
+
+    rule_key: str
+    bot_item_name_pattern: str
+    variant_required: bool = False
+    allowed_variant_groups: str = ""
+    cost_mode: str = ""
+    magic_surcharge_gp: Decimal | None = None
+    base_cost_formula: str = ""
+    craft_gp_formula: str = ""
+    craft_dtp_formula: str = ""
+    display_name_rule: str = ""
+    example_variant: str = ""
+    notes: str = ""
 
 
 ARMOR_COSTS_GP = {
@@ -171,6 +211,14 @@ def _clean(value: object) -> str:
     return str(value or "").strip()
 
 
+def normalize_lookup_key(value: object) -> str:
+    """Normalize names/lookup keys for exact-ish sheet comparisons."""
+    text = _clean(value).casefold()
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
 def _parse_decimal(text: str) -> Decimal | None:
     try:
         return Decimal(text.replace(",", "").strip())
@@ -186,6 +234,26 @@ def _whole_positive_gp(number: Decimal | None) -> int | None:
 
 def _floor_gp(number: Decimal) -> int:
     return int(number.to_integral_value(rounding=ROUND_FLOOR))
+
+
+def _ceil_int(number: Decimal) -> int:
+    return int(number.to_integral_value(rounding=ROUND_CEILING))
+
+
+def decimal_from_cell(value: object) -> Decimal | None:
+    """Parse a numeric sheet cell into Decimal, accepting gp text."""
+    text = _clean(value)
+    if not text:
+        return None
+    text = text.casefold().replace(",", "").replace("gp", "").strip()
+    return _parse_decimal(text)
+
+
+def bool_from_cell(value: object, *, default: bool = False) -> bool:
+    text = _clean(value).casefold()
+    if not text:
+        return default
+    return text in {"true", "yes", "y", "1"}
 
 
 def parse_static_base_price(value: object) -> int | None:
@@ -292,6 +360,320 @@ def suggested_variants_for_base_cost(value: object) -> tuple[str, ...]:
         elif group == "weapon":
             suggestions.extend(SUGGESTED_WEAPON_VARIANTS)
     return tuple(dict.fromkeys(suggestions))
+
+
+def _base_item_name(item_name: str) -> str:
+    """Strip a final parenthetical like '(any)' for rule matching."""
+    return re.sub(r"\s*\([^)]*\)\s*$", "", _clean(item_name)).strip()
+
+
+def pricing_rule_for_item(
+    item_name: str,
+    rules: list[PricingTemplateRule] | tuple[PricingTemplateRule, ...],
+) -> PricingTemplateRule | None:
+    """Find the best pricing template rule for a Bot Items row."""
+    name = normalize_lookup_key(item_name)
+    base_name = normalize_lookup_key(_base_item_name(item_name))
+    exact_pattern: list[PricingTemplateRule] = []
+    exact_key: list[PricingTemplateRule] = []
+    base_matches: list[PricingTemplateRule] = []
+    for rule in rules:
+        pattern = normalize_lookup_key(rule.bot_item_name_pattern)
+        key = normalize_lookup_key(rule.rule_key)
+        if pattern and pattern == name:
+            exact_pattern.append(rule)
+        elif key and key == name:
+            exact_key.append(rule)
+        elif (pattern and pattern == base_name) or (key and key == base_name):
+            base_matches.append(rule)
+    for matches in (exact_pattern, exact_key, base_matches):
+        if matches:
+            return matches[-1]
+    return None
+
+
+def item_requires_template_variant(item: object, rules: list[PricingTemplateRule]) -> bool:
+    """Return True if the sheet/rules mark a Bot Item as a template."""
+    rule = pricing_rule_for_item(getattr(item, "name", ""), rules)
+    if rule and rule.variant_required:
+        return True
+    variant_type = _clean(getattr(item, "variant_type", "")).casefold()
+    if variant_type and variant_type != "specific item":
+        return True
+    if _clean(getattr(item, "variant_instructions", "")) or _clean(getattr(item, "variant_options", "")):
+        return True
+    return base_cost_requires_variant(getattr(item, "base_price_text", ""))
+
+
+def _mundane_group_set(item: MundaneItem) -> set[str]:
+    text = " ".join(
+        (
+            item.variant_group,
+            item.category,
+            item.lookup_key,
+            item.item_name,
+        )
+    ).casefold()
+    groups: set[str] = set()
+    for group in ("weapon", "firearm", "ammunition", "armor", "shield", "barding", "general"):
+        if group in text:
+            groups.add(group)
+    if "shield" in normalize_lookup_key(item.item_name):
+        groups.add("shield")
+    return groups
+
+
+def _allowed_group_sets(rule: PricingTemplateRule | None, base_price_text: str) -> tuple[set[str], set[str], set[str]]:
+    """Return allowed groups, excluded groups, and excluded normalized names."""
+    raw = _clean(rule.allowed_variant_groups if rule else "").casefold()
+    allowed: set[str] = set()
+    excluded_groups: set[str] = set()
+    excluded_names: set[str] = set()
+
+    if "weapon_or_ammunition" in raw:
+        allowed.update({"weapon", "firearm", "ammunition"})
+    if "weapon" in raw:
+        allowed.update({"weapon", "firearm"})
+    if "firearm" in raw:
+        allowed.add("firearm")
+    if "ammunition" in raw:
+        allowed.add("ammunition")
+    if "armor" in raw:
+        allowed.add("armor")
+    if "shield" in raw:
+        allowed.add("shield")
+    if "general" in raw:
+        allowed.add("general")
+
+    if "no shield" in raw or "exclude shield" in raw or "armor only" in raw:
+        excluded_groups.add("shield")
+        allowed.discard("shield")
+    if "exclude hide" in raw:
+        excluded_names.add("hide armor")
+        excluded_names.add("hide")
+
+    if not allowed:
+        for group in base_cost_variant_groups(base_price_text):
+            if group == "weapon":
+                allowed.update({"weapon", "firearm"})
+            elif group == "armor":
+                allowed.update({"armor", "shield"})
+            else:
+                allowed.add(group)
+
+    return allowed, excluded_groups, excluded_names
+
+
+def _is_variant_allowed(
+    mundane: MundaneItem,
+    *,
+    rule: PricingTemplateRule | None,
+    base_price_text: str,
+) -> tuple[bool, str]:
+    allowed, excluded_groups, excluded_names = _allowed_group_sets(rule, base_price_text)
+    groups = _mundane_group_set(mundane)
+    item_key = normalize_lookup_key(mundane.item_name)
+    lookup_key = normalize_lookup_key(mundane.lookup_key)
+
+    if item_key in excluded_names or lookup_key in excluded_names:
+        return False, f"{mundane.item_name} is explicitly excluded for this template."
+    if groups & excluded_groups:
+        group_text = ", ".join(sorted(groups & excluded_groups))
+        return False, f"{mundane.item_name} is a {group_text} variant, which this template excludes."
+    if allowed and not (groups & allowed):
+        return False, f"{mundane.item_name} is {mundane.variant_group or mundane.category}, but this template requires {', '.join(sorted(allowed))}."
+    return True, ""
+
+
+def find_mundane_variant(
+    variant: str | None,
+    mundane_items: list[MundaneItem] | tuple[MundaneItem, ...],
+) -> tuple[MundaneItem | None, str]:
+    """Resolve a user variant by exact Item Name or Lookup Key."""
+    query = normalize_lookup_key(variant)
+    if not query:
+        return None, "A concrete variant is required."
+
+    matches = [
+        item
+        for item in mundane_items
+        if item.eligible_as_magic_variant_base
+        and query in {normalize_lookup_key(item.item_name), normalize_lookup_key(item.lookup_key)}
+    ]
+    if not matches:
+        return None, f"`{variant}` was not found in Mundane Item Reference."
+
+    unique_keys = {(normalize_lookup_key(item.lookup_key), normalize_lookup_key(item.item_name)) for item in matches}
+    if len(unique_keys) > 1:
+        names = ", ".join(sorted(item.item_name for item in matches)[:8])
+        return None, f"`{variant}` is ambiguous in Mundane Item Reference. Matching rows: {names}."
+
+    return matches[0], ""
+
+
+def _leading_surcharge(value: object) -> Decimal | None:
+    text = _clean(value)
+    match = LEADING_GP_RE.match(text)
+    if match is None:
+        return None
+    return _parse_decimal(match.group("amount"))
+
+
+def _craft_gp_from_text(value: str, total_base_cost: Decimal) -> Decimal | None:
+    text = _clean(value).casefold()
+    if not text:
+        return None
+    number = decimal_from_cell(text)
+    if number is not None:
+        return number
+    if "total cost" in text and "/ 2" in text:
+        return total_base_cost / Decimal(2)
+    return None
+
+
+def _craft_dtp_from_text(value: str, total_base_cost: Decimal) -> int | None:
+    text = _clean(value).casefold()
+    if not text:
+        return None
+    number = decimal_from_cell(text)
+    if number is not None:
+        return max(1, _ceil_int(number))
+    if "total cost" in text and "/ 25" in text:
+        return max(1, _ceil_int(total_base_cost / Decimal(25)))
+    return None
+
+
+def resolve_reference_base_cost(
+    *,
+    item: object,
+    variant: str | None,
+    mundane_items: list[MundaneItem] | tuple[MundaneItem, ...],
+    pricing_rules: list[PricingTemplateRule] | tuple[PricingTemplateRule, ...],
+) -> BaseCostResolution:
+    """Resolve Dwarfy pricing using Bot Items plus the mundane reference tabs."""
+    base_price_text = _clean(getattr(item, "base_price_text", ""))
+    rule = pricing_rule_for_item(getattr(item, "name", ""), pricing_rules)
+    cost_mode = _clean(rule.cost_mode if rule else "").upper()
+    requires_variant = bool(rule and rule.variant_required) or base_cost_requires_variant(base_price_text)
+
+    if not rule and not mundane_items:
+        return resolve_base_cost(base_price_text, variant=variant)
+
+    if not cost_mode:
+        cost_mode = "ADD_MUNDANE_COST" if requires_variant else "FIXED_GP"
+
+    if cost_mode == "FIXED_GP" and not requires_variant:
+        return resolve_base_cost(base_price_text, variant=variant)
+
+    if requires_variant and not variant:
+        return BaseCostResolution(
+            None,
+            error="This template needs a concrete mundane variant before Dwarfy can price it.",
+            needs_variant=True,
+            recognized=True,
+        )
+
+    mundane, error = find_mundane_variant(variant, mundane_items)
+    if mundane is None:
+        return BaseCostResolution(None, error=error, needs_variant=True, recognized=True)
+
+    allowed, allowed_error = _is_variant_allowed(mundane, rule=rule, base_price_text=base_price_text)
+    if not allowed:
+        return BaseCostResolution(None, error=allowed_error, needs_variant=True, recognized=True)
+
+    if mundane.cost_gp is None:
+        return BaseCostResolution(
+            None,
+            error=f"`{mundane.item_name}` does not have a numeric mundane cost.",
+            needs_variant=True,
+            recognized=True,
+        )
+
+    if cost_mode == "MULTIPLY_MUNDANE_COST":
+        multiplier = Decimal(4)
+        craft_multiplier = Decimal(2)
+        total = mundane.cost_gp * multiplier
+        craft_gp = mundane.cost_gp * craft_multiplier
+        craft_dtp = max(1, _ceil_int(craft_gp / Decimal(25)))
+        return BaseCostResolution(
+            _floor_gp(total),
+            detail=f"{mundane.item_name} {mundane.cost_gp:g}gp x {multiplier:g} = {_floor_gp(total)}gp",
+            recognized=True,
+            mundane_item_name=mundane.item_name,
+            mundane_lookup_key=mundane.lookup_key,
+            mundane_cost_gp=mundane.cost_gp,
+            craft_cost_gp=craft_gp,
+            craft_cost_dtp=craft_dtp,
+        )
+
+    surcharge = (rule.magic_surcharge_gp if rule and rule.magic_surcharge_gp is not None else None)
+    if surcharge is None:
+        surcharge = _leading_surcharge(base_price_text)
+    if surcharge is None:
+        return BaseCostResolution(
+            None,
+            error=f"Could not determine the magic surcharge from Base Cost {base_price_text!r}.",
+            needs_variant=True,
+            recognized=True,
+        )
+
+    total = surcharge + mundane.cost_gp
+    craft_gp = _craft_gp_from_text(getattr(item, "craft_cost_gp_text", ""), total)
+    if craft_gp is None and rule:
+        craft_gp = _craft_gp_from_text(rule.craft_gp_formula, total)
+    craft_dtp = _craft_dtp_from_text(getattr(item, "craft_cost_dtp_text", ""), total)
+    if craft_dtp is None and rule:
+        craft_dtp = _craft_dtp_from_text(rule.craft_dtp_formula, total)
+
+    return BaseCostResolution(
+        _floor_gp(total),
+        detail=f"{surcharge:g}gp + {mundane.item_name} {mundane.cost_gp:g}gp = {_floor_gp(total)}gp",
+        recognized=True,
+        mundane_item_name=mundane.item_name,
+        mundane_lookup_key=mundane.lookup_key,
+        mundane_cost_gp=mundane.cost_gp,
+        craft_cost_gp=craft_gp,
+        craft_cost_dtp=craft_dtp,
+    )
+
+
+def suggested_variants_from_reference(
+    *,
+    item: object,
+    mundane_items: list[MundaneItem] | tuple[MundaneItem, ...],
+    pricing_rules: list[PricingTemplateRule] | tuple[PricingTemplateRule, ...],
+    query: str = "",
+    limit: int = 25,
+) -> list[str]:
+    """Suggest variant names from Mundane Item Reference for a Bot Item."""
+    rule = pricing_rule_for_item(getattr(item, "name", ""), pricing_rules)
+    allowed_groups, excluded_groups, excluded_names = _allowed_group_sets(
+        rule,
+        getattr(item, "base_price_text", ""),
+    )
+    query_norm = normalize_lookup_key(query)
+    suggestions: list[str] = []
+    seen: set[str] = set()
+    for mundane in mundane_items:
+        if not mundane.eligible_as_magic_variant_base:
+            continue
+        groups = _mundane_group_set(mundane)
+        if groups & excluded_groups:
+            continue
+        if allowed_groups and not (groups & allowed_groups):
+            continue
+        if normalize_lookup_key(mundane.item_name) in excluded_names or normalize_lookup_key(mundane.lookup_key) in excluded_names:
+            continue
+        key = normalize_lookup_key(mundane.item_name)
+        if not key or key in seen:
+            continue
+        if query_norm and query_norm not in key and query_norm not in normalize_lookup_key(mundane.lookup_key):
+            continue
+        seen.add(key)
+        suggestions.append(mundane.item_name)
+        if len(suggestions) >= limit:
+            break
+    return suggestions
 
 
 def _extract_quantity(text: str) -> int | None:

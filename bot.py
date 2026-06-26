@@ -101,6 +101,8 @@ class DwarfyBot(commands.Bot):
         else:
             print(f"[sheets] Loaded {len(self.sheet_cache.items)} Bot Items rows.")
             print(f"[sheets] Loaded {len(self.sheet_cache.components)} Monster Components rows.")
+            print(f"[sheets] Loaded {len(self.sheet_cache.mundane_items)} Mundane Item Reference rows.")
+            print(f"[sheets] Loaded {len(self.sheet_cache.pricing_rules)} Pricing Template Rules rows.")
             if self.sheet_cache.warnings:
                 print("[sheets] Validation warnings:")
                 for warning in self.sheet_cache.warnings:

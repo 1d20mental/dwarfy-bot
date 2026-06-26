@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -21,7 +22,7 @@ from services.pricing import (
     roll_broker_price,
     roll_buy_price,
 )
-from services.equipment import resolve_base_cost
+from services.equipment import MundaneItem, PricingTemplateRule, resolve_base_cost
 from services.sheets import MonsterComponent, SheetCache, SheetItem
 
 
@@ -37,11 +38,13 @@ class FakeSpreadsheet:
     def __init__(self, values):
         self._values = values
 
-    def worksheet(self, _name):
+    def worksheet(self, name):
+        if isinstance(self._values, dict):
+            return FakeWorksheet(self._values[name])
         return FakeWorksheet(self._values)
 
 
-def make_cache(items=None, components=None):
+def make_cache(items=None, components=None, mundane_items=None, pricing_rules=None):
     cache = SheetCache(
         sheet_id="test",
         service_account_file="service-account.json",
@@ -50,6 +53,8 @@ def make_cache(items=None, components=None):
     )
     cache.items = list(items or [])
     cache.components = list(components or [])
+    cache.mundane_items = list(mundane_items or [])
+    cache.pricing_rules = list(pricing_rules or [])
     cache.loaded = True
     return cache
 
@@ -83,6 +88,10 @@ def item(
     variant_options="",
     base_price=400,
     base_price_text=None,
+    tier="",
+    power_band="",
+    craft_cost_gp_text="",
+    craft_cost_dtp_text="",
 ):
     if base_price_text is None:
         base_price_text = str(base_price) if base_price is not None else ""
@@ -117,7 +126,43 @@ def item(
         rules_text=rules_text,
         item_tags=item_tags,
         variant_options=variant_options,
+        tier=tier,
+        power_band=power_band,
+        craft_cost_gp_text=craft_cost_gp_text,
+        craft_cost_dtp_text=craft_cost_dtp_text,
         notes="",
+    )
+
+
+def mundane(name, group, cost, *, lookup_key=None, eligible=True):
+    return MundaneItem(
+        lookup_key=lookup_key or name.casefold(),
+        item_name=name,
+        variant_group=group,
+        cost_gp=Decimal(str(cost)) if cost is not None else None,
+        eligible_as_magic_variant_base=eligible,
+    )
+
+
+def pricing_rule(
+    name,
+    *,
+    groups,
+    mode="ADD_MUNDANE_COST",
+    surcharge=None,
+    variant_required=True,
+    craft_gp_formula="",
+    craft_dtp_formula="",
+):
+    return PricingTemplateRule(
+        rule_key=name.casefold(),
+        bot_item_name_pattern=name,
+        variant_required=variant_required,
+        allowed_variant_groups=groups,
+        cost_mode=mode,
+        magic_surcharge_gp=Decimal(str(surcharge)) if surcharge is not None else None,
+        craft_gp_formula=craft_gp_formula,
+        craft_dtp_formula=craft_dtp_formula,
     )
 
 
@@ -206,6 +251,51 @@ class SheetParsingTests(unittest.TestCase):
         self.assertIsNone(items[0].base_price)
         self.assertEqual(items[0].base_price_text, "400 GP (plus cost of armor)")
         self.assertEqual(len([warning for warning in cache.warnings if "invalid Base Price" in warning]), 0)
+
+    def test_moderator_pricing_and_tier_columns_are_preserved(self):
+        rows = [
+            [
+                "Item Name",
+                "Rarity",
+                "Roll Rarity",
+                "Base Cost",
+                "Craft Cost GP",
+                "Craft Cost DTP",
+                "Power Band",
+                "Tier",
+                "Bastion Facility",
+                "Tool",
+                "Consumable",
+                "Allowed",
+                "Session Eligible",
+            ],
+            [
+                "Adamantine Armor",
+                "Uncommon",
+                "Rare",
+                "4000 GP (plus cost of armor)",
+                "2000 GP (plus cost of armor & Robust Essence)",
+                "10",
+                "Power Band 1",
+                "T2 Permanent",
+                "Smithy",
+                "See Equipment (depends on armor type)",
+                "FALSE",
+                "TRUE",
+                "TRUE",
+            ],
+        ]
+        _cache, items = self.load_items(rows)
+
+        self.assertEqual(items[0].rarity, "Uncommon")
+        self.assertEqual(items[0].roll_rarity, "Rare")
+        self.assertEqual(items[0].base_price_text, "4000 GP (plus cost of armor)")
+        self.assertEqual(items[0].craft_cost_gp_text, "2000 GP (plus cost of armor & Robust Essence)")
+        self.assertEqual(items[0].craft_cost_dtp_text, "10")
+        self.assertEqual(items[0].power_band, "Power Band 1")
+        self.assertEqual(items[0].tier, "T2 Permanent")
+        self.assertEqual(items[0].bastion_facility, "Smithy")
+        self.assertEqual(items[0].tool, "See Equipment (depends on armor type)")
 
     def test_base_cost_formulas_resolve_with_equipment_variants(self):
         armor = resolve_base_cost("400 GP (plus cost of armor)", variant="Breastplate")
@@ -1415,6 +1505,145 @@ class MatchingAndDwarfyTests(unittest.TestCase):
 
         self.assertIsNone(resolution.base_price)
         self.assertTrue(resolution.needs_variant)
+
+    def test_reference_pricing_plus_one_weapon_longsword(self):
+        row = item(
+            "+1 Weapon (any)",
+            base_price=None,
+            base_price_text="400 GP (plus cost of weapon)",
+            variant_type="Weapon Template",
+        )
+        cache = make_cache(
+            [row],
+            mundane_items=[mundane("Longsword", "weapon", 15)],
+            pricing_rules=[pricing_rule("+1 Weapon (any)", groups="weapon, firearm", surcharge=400)],
+        )
+
+        result = cache.resolve_base_cost_for_item(row, "Longsword")
+
+        self.assertEqual(result.base_price, 415)
+        self.assertIn("400gp + Longsword 15gp = 415gp", result.detail)
+
+    def test_reference_pricing_adamantine_armor_plate(self):
+        row = item(
+            "Adamantine Armor (any medium or heavy armor except hide)",
+            base_price=None,
+            base_price_text="4000 GP (plus cost of armor)",
+            variant_type="Armor Template",
+            tier="T2 Permanent",
+            power_band="Power Band 1",
+        )
+        cache = make_cache(
+            [row],
+            mundane_items=[mundane("Plate Armor", "armor", 1500)],
+            pricing_rules=[
+                pricing_rule(
+                    "Adamantine Armor (any medium or heavy armor except hide)",
+                    groups="armor (medium/heavy only; exclude Hide Armor)",
+                    surcharge=4000,
+                )
+            ],
+        )
+
+        result = cache.resolve_base_cost_for_item(row, "Plate Armor")
+
+        self.assertEqual(result.base_price, 5500)
+        self.assertEqual(row.tier, "T2 Permanent")
+        self.assertEqual(row.power_band, "Power Band 1")
+
+    def test_reference_pricing_silvered_weapon_longsword_and_craft_formula(self):
+        row = item(
+            "Silvered Weapon (any melee)",
+            base_price=None,
+            base_price_text="100 GP in addition to weapon or ammunition cost",
+            craft_cost_gp_text="Total cost / 2",
+            craft_cost_dtp_text="Total cost / 25",
+            variant_type="Template",
+        )
+        cache = make_cache(
+            [row],
+            mundane_items=[mundane("Longsword", "weapon", 15)],
+            pricing_rules=[
+                pricing_rule(
+                    "Silvered Weapon (any melee)",
+                    groups="weapon, ammunition",
+                    surcharge=100,
+                    craft_gp_formula="craft_cost_gp = total_base_cost_gp / 2",
+                    craft_dtp_formula="craft_cost_dtp = ceil(total_base_cost_gp / 25)",
+                )
+            ],
+        )
+
+        result = cache.resolve_base_cost_for_item(row, "Longsword")
+
+        self.assertEqual(result.base_price, 115)
+        self.assertEqual(result.craft_cost_gp, Decimal("57.5"))
+        self.assertEqual(result.craft_cost_dtp, 5)
+
+    def test_reference_pricing_barding_chain_mail(self):
+        row = item(
+            "Barding",
+            base_price=None,
+            base_price_text="",
+            variant_type="Armor Template",
+        )
+        cache = make_cache(
+            [row],
+            mundane_items=[mundane("Chain Mail", "armor", 75)],
+            pricing_rules=[
+                pricing_rule(
+                    "Barding",
+                    groups="armor only, no shields",
+                    mode="MULTIPLY_MUNDANE_COST",
+                    surcharge=None,
+                )
+            ],
+        )
+
+        result = cache.resolve_base_cost_for_item(row, "Chain Mail")
+
+        self.assertEqual(result.base_price, 300)
+        self.assertEqual(result.craft_cost_gp, Decimal("150"))
+        self.assertEqual(result.craft_cost_dtp, 6)
+
+    def test_reference_pricing_rejects_wrong_variant_groups(self):
+        weapon = item("+1 Weapon (any)", base_price=None, base_price_text="400 GP (plus cost of weapon)")
+        armor = item("Adamantine Armor (any)", base_price=None, base_price_text="4000 GP (plus cost of armor)")
+        cache = make_cache(
+            [weapon, armor],
+            mundane_items=[mundane("Plate Armor", "armor", 1500), mundane("Longsword", "weapon", 15)],
+            pricing_rules=[
+                pricing_rule("+1 Weapon (any)", groups="weapon, firearm", surcharge=400),
+                pricing_rule("Adamantine Armor (any)", groups="armor", surcharge=4000),
+            ],
+        )
+
+        weapon_result = cache.resolve_base_cost_for_item(weapon, "Plate Armor")
+        armor_result = cache.resolve_base_cost_for_item(armor, "Longsword")
+
+        self.assertIsNone(weapon_result.base_price)
+        self.assertIn("requires", weapon_result.error)
+        self.assertIsNone(armor_result.base_price)
+        self.assertIn("requires", armor_result.error)
+
+    def test_reference_pricing_reports_ambiguous_and_missing_variants(self):
+        row = item("+1 Weapon (any)", base_price=None, base_price_text="400 GP (plus cost of weapon)")
+        cache = make_cache(
+            [row],
+            mundane_items=[
+                mundane("Longsword", "weapon", 15, lookup_key="longsword phb"),
+                mundane("Longsword", "weapon", 20, lookup_key="longsword custom"),
+            ],
+            pricing_rules=[pricing_rule("+1 Weapon (any)", groups="weapon", surcharge=400)],
+        )
+
+        ambiguous = cache.resolve_base_cost_for_item(row, "Longsword")
+        missing = cache.resolve_base_cost_for_item(row, None)
+
+        self.assertIsNone(ambiguous.base_price)
+        self.assertIn("ambiguous", ambiguous.error)
+        self.assertIsNone(missing.base_price)
+        self.assertTrue(missing.needs_variant)
 
     def test_dwarfy_sell_details_resolve_listing_name(self):
         from cogs.dwarfy import resolved_listing_name

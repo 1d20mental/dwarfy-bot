@@ -14,9 +14,16 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from services.equipment import (
+    MundaneItem,
+    PricingTemplateRule,
     base_cost_has_price_signal,
+    bool_from_cell,
+    decimal_from_cell,
     parse_static_base_price,
+    pricing_rule_for_item,
+    resolve_reference_base_cost,
     suggested_variants_for_base_cost,
+    suggested_variants_from_reference,
 )
 
 
@@ -74,6 +81,14 @@ class SheetItem:
     variant_options: str = ""
     json_source_key: str = ""
     json_match_status: str = ""
+    power_band: str = ""
+    tier: str = ""
+    craft_cost_gp_text: str = ""
+    craft_cost_dtp_text: str = ""
+    bastion_facility: str = ""
+    tool: str = ""
+    consumable_1d3_roll: str = ""
+    quantity_roll_recommendation: str = ""
 
     @property
     def tags_text(self) -> str:
@@ -488,6 +503,8 @@ class SheetCache:
         self.monster_components_tab = monster_components_tab
         self.items: list[SheetItem] = []
         self.components: list[MonsterComponent] = []
+        self.mundane_items: list[MundaneItem] = []
+        self.pricing_rules: list[PricingTemplateRule] = []
         self.warnings: list[str] = []
         self.loaded = False
 
@@ -496,6 +513,8 @@ class SheetCache:
         self.loaded = False
         self.items = []
         self.components = []
+        self.mundane_items = []
+        self.pricing_rules = []
         self.warnings = []
 
         if not self.sheet_id:
@@ -516,6 +535,8 @@ class SheetCache:
 
         self.items = self._load_bot_items(spreadsheet)
         self.components = self._load_monster_components(spreadsheet)
+        self.mundane_items = self._load_mundane_items(spreadsheet)
+        self.pricing_rules = self._load_pricing_template_rules(spreadsheet)
         self.loaded = True
 
     def _load_bot_items(self, spreadsheet) -> list[SheetItem]:
@@ -652,6 +673,14 @@ class SheetCache:
                     variant_options=_cell(row, headers, "Variant Options"),
                     json_source_key=_cell(row, headers, "JSON Source Key"),
                     json_match_status=_cell(row, headers, "JSON Match Status"),
+                    power_band=_cell(row, headers, "Power Band"),
+                    tier=_cell(row, headers, "Tier"),
+                    craft_cost_gp_text=_cell(row, headers, "Craft Cost GP"),
+                    craft_cost_dtp_text=_cell(row, headers, "Craft Cost DTP"),
+                    bastion_facility=_cell(row, headers, "Bastion Facility"),
+                    tool=_cell(row, headers, "Tool"),
+                    consumable_1d3_roll=_cell(row, headers, "Consumable 1d3 Roll"),
+                    quantity_roll_recommendation=_cell(row, headers, "Quantity Roll Recommendation"),
                     notes=_cell(row, headers, "Notes"),
                 )
             )
@@ -688,9 +717,79 @@ class SheetCache:
             )
         return components
 
+    def _load_mundane_items(self, spreadsheet) -> list[MundaneItem]:
+        """Load optional Mundane Item Reference rows for template pricing."""
+        try:
+            values = spreadsheet.worksheet("Mundane Item Reference").get_all_values()
+        except gspread.exceptions.WorksheetNotFound:
+            return []
+        if not values:
+            return []
+
+        headers = _header_map(values[0])
+        items: list[MundaneItem] = []
+        for row in values[1:]:
+            lookup_key = _cell(row, headers, "Lookup Key")
+            item_name = _cell(row, headers, "Item Name")
+            if not lookup_key and not item_name:
+                continue
+            items.append(
+                MundaneItem(
+                    lookup_key=lookup_key,
+                    item_name=item_name,
+                    category=_cell(row, headers, "Category"),
+                    variant_group=_cell(row, headers, "Variant Group"),
+                    cost_gp_raw=_cell(row, headers, "Cost GP Raw"),
+                    cost_gp=decimal_from_cell(_cell(row, headers, "Cost GP Numeric")),
+                    cost_mode=_cell(row, headers, "Cost Mode"),
+                    formula_surcharge_gp=decimal_from_cell(_cell(row, headers, "Formula Surcharge GP")),
+                    cost_base_required=bool_from_cell(_cell(row, headers, "Cost Base Required")),
+                    cost_base_group_required=_cell(row, headers, "Cost Base Group Required"),
+                    eligible_as_magic_variant_base=bool_from_cell(
+                        _cell(row, headers, "Eligible as Magic Variant Base"),
+                        default=True,
+                    ),
+                )
+            )
+        return items
+
+    def _load_pricing_template_rules(self, spreadsheet) -> list[PricingTemplateRule]:
+        """Load optional Pricing Template Rules rows for template pricing."""
+        try:
+            values = spreadsheet.worksheet("Pricing Template Rules").get_all_values()
+        except gspread.exceptions.WorksheetNotFound:
+            return []
+        if not values:
+            return []
+
+        headers = _header_map(values[0])
+        rules: list[PricingTemplateRule] = []
+        for row in values[1:]:
+            rule_key = _cell(row, headers, "Rule Key")
+            pattern = _cell(row, headers, "Bot Item Name Pattern")
+            if not rule_key and not pattern:
+                continue
+            rules.append(
+                PricingTemplateRule(
+                    rule_key=rule_key,
+                    bot_item_name_pattern=pattern,
+                    variant_required=bool_from_cell(_cell(row, headers, "Variant Required")),
+                    allowed_variant_groups=_cell(row, headers, "Allowed Variant Groups"),
+                    cost_mode=_cell(row, headers, "Cost Mode"),
+                    magic_surcharge_gp=decimal_from_cell(_cell(row, headers, "Magic Surcharge GP")),
+                    base_cost_formula=_cell(row, headers, "Base Cost Formula"),
+                    craft_gp_formula=_cell(row, headers, "Craft GP Formula"),
+                    craft_dtp_formula=_cell(row, headers, "Craft DTP Formula"),
+                    display_name_rule=_cell(row, headers, "Display Name Rule"),
+                    example_variant=_cell(row, headers, "Example Variant"),
+                    notes=_cell(row, headers, "Notes"),
+                )
+            )
+        return rules
+
     def _sell_preference_score(self, item: SheetItem) -> int:
         score = 0
-        if item_has_dwarfy_base_cost(item):
+        if self.item_has_dwarfy_pricing(item):
             score += 8
         if item.allowed:
             score += 4
@@ -746,7 +845,7 @@ class SheetCache:
             if for_sell:
                 if item.consumable:
                     continue
-                if not item_has_dwarfy_base_cost(item):
+                if not self.item_has_dwarfy_pricing(item):
                     continue
             score = _score_match(query, item.name)
             if score < 0.58:
@@ -784,7 +883,7 @@ class SheetCache:
         for item in self.items:
             if not item.allowed or item.consumable or item.dwarfy_sell_eligible is False:
                 continue
-            if not item_has_dwarfy_base_cost(item):
+            if not self.item_has_dwarfy_pricing(item):
                 continue
             key = item.name.casefold().strip()
             if key in seen:
@@ -833,9 +932,18 @@ class SheetCache:
             if item is None or not item.allowed or item.loot_type != "Item":
                 continue
             if for_sell:
-                if item.consumable or item.dwarfy_sell_eligible is False or not item_has_dwarfy_base_cost(item):
+                if item.consumable or item.dwarfy_sell_eligible is False or not self.item_has_dwarfy_pricing(item):
                     continue
-            for option in item.variant_option_list + suggested_variants_for_base_cost(item.base_price_text):
+            reference_options = tuple(
+                suggested_variants_from_reference(
+                    item=item,
+                    mundane_items=self.mundane_items,
+                    pricing_rules=self.pricing_rules,
+                    query=query,
+                    limit=limit,
+                )
+            )
+            for option in item.variant_option_list + reference_options + suggested_variants_for_base_cost(item.base_price_text):
                 key = option.casefold().strip()
                 if not key or key in seen:
                     continue
@@ -844,6 +952,24 @@ class SheetCache:
                 seen.add(key)
                 options.append(option)
         return options[:limit]
+
+    def pricing_rule_for_item(self, item: SheetItem) -> PricingTemplateRule | None:
+        return pricing_rule_for_item(item.name, self.pricing_rules)
+
+    def item_has_dwarfy_pricing(self, item: SheetItem) -> bool:
+        return item_has_dwarfy_base_cost(item) or self.pricing_rule_for_item(item) is not None
+
+    def item_requires_pricing_variant(self, item: SheetItem) -> bool:
+        rule = self.pricing_rule_for_item(item)
+        return bool(rule and rule.variant_required)
+
+    def resolve_base_cost_for_item(self, item: SheetItem, variant: str | None = None):
+        return resolve_reference_base_cost(
+            item=item,
+            variant=variant,
+            mundane_items=self.mundane_items,
+            pricing_rules=self.pricing_rules,
+        )
 
     def loot_pool(self, *, rarity: str, consumable: bool, apl: int) -> list[SheetItem]:
         """Return session-eligible items matching roll rarity, slot type, and APL."""

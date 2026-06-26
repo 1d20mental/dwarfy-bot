@@ -352,8 +352,14 @@ def record_base_price(record: dict[str, Any]) -> int | None:
     return int(value)
 
 
-def resolve_sheet_item_base_price(sheet_item: Any, variant: str | None = None) -> BaseCostResolution:
+def resolve_sheet_item_base_price(
+    sheet_item: Any,
+    variant: str | None = None,
+    cache: Any | None = None,
+) -> BaseCostResolution:
     """Resolve a sheet row's Dwarfy base price for a specific variant."""
+    if cache is not None and hasattr(cache, "resolve_base_cost_for_item"):
+        return cache.resolve_base_cost_for_item(sheet_item, variant)
     if sheet_item.base_price is not None:
         price = int(sheet_item.base_price)
         return BaseCostResolution(price, detail=f"{price}gp", recognized=True)
@@ -423,6 +429,7 @@ def enrich_record_tier_from_cache(record: dict[str, Any], cache: Any) -> dict[st
             resolution = resolve_sheet_item_base_price(
                 match.item,
                 str(record.get("variant") or record.get("variant_details") or "").strip() or None,
+                cache,
             )
             enriched["base_price"] = resolution.base_price
         return enriched
@@ -964,7 +971,12 @@ def stock_item_pool(
                 consumable=consumable,
                 apl=apl,
             )
-            if item.loot_type == "Item" and item_has_dwarfy_base_cost(item)
+            if item.loot_type == "Item"
+            and (
+                cache.item_has_dwarfy_pricing(item)
+                if hasattr(cache, "item_has_dwarfy_pricing")
+                else item_has_dwarfy_base_cost(item)
+            )
         ]
         if tag_norm:
             tagged = [item for item in pool if tag_norm in item.tags]
@@ -1145,7 +1157,7 @@ def build_buy_receipt(
     return "\n".join(lines)
 
 
-def sell_validation_error(sheet_item) -> str | None:
+def sell_validation_error(sheet_item, cache: Any | None = None) -> str | None:
     """Return an ephemeral validation error for /dwarfy sell, or None."""
     if not sheet_item.allowed:
         return f"`{sheet_item.name}` exists in the sheet, but Allowed is FALSE."
@@ -1153,7 +1165,10 @@ def sell_validation_error(sheet_item) -> str | None:
         return f"`{sheet_item.name}` is marked Consumable=TRUE. Dwarfy only buys permanent magic items."
     if sheet_item.dwarfy_sell_eligible is False:
         return f"`{sheet_item.name}` is marked Dwarfy Sell Eligible=FALSE and cannot be sold to Dwarfy."
-    if not item_has_dwarfy_base_cost(sheet_item):
+    has_pricing = item_has_dwarfy_base_cost(sheet_item)
+    if cache is not None and hasattr(cache, "item_has_dwarfy_pricing"):
+        has_pricing = cache.item_has_dwarfy_pricing(sheet_item)
+    if not has_pricing:
         return (
             f"`{sheet_item.name}` does not have a Base Price in the sheet. "
             "It cannot be sold directly or brokered through Dwarfy, but it can still be posted in classifieds."
@@ -2044,15 +2059,17 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return None
 
         sheet_item = match.item
-        validation_error = sell_validation_error(sheet_item)
+        validation_error = sell_validation_error(sheet_item, self.bot.sheet_cache)
         if validation_error:
             await interaction.response.send_message(validation_error, ephemeral=True)
             return None
 
         variant_clean = (variant or "").strip() or None
         details_clean = (details or "").strip() or None
-        is_template = is_generic_template_item(sheet_item) or base_cost_requires_variant(
-            getattr(sheet_item, "base_price_text", "")
+        is_template = (
+            is_generic_template_item(sheet_item)
+            or base_cost_requires_variant(getattr(sheet_item, "base_price_text", ""))
+            or self.bot.sheet_cache.item_requires_pricing_variant(sheet_item)
         )
 
         if variant_clean and not is_template:
@@ -2068,7 +2085,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return None
 
-        base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant_clean)
+        base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant_clean, self.bot.sheet_cache)
         if base_cost_resolution.base_price is None:
             await interaction.response.send_message(
                 base_cost_error_text(sheet_item, base_cost_resolution),
@@ -2262,8 +2279,10 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         variant_clean = (variant or "").strip() or None
         notes_clean = (notes or "").strip() or None
-        is_template = is_generic_template_item(sheet_item) or base_cost_requires_variant(
-            getattr(sheet_item, "base_price_text", "")
+        is_template = (
+            is_generic_template_item(sheet_item)
+            or base_cost_requires_variant(getattr(sheet_item, "base_price_text", ""))
+            or self.bot.sheet_cache.item_requires_pricing_variant(sheet_item)
         )
         if variant_clean and not is_template:
             await interaction.response.send_message(
@@ -2278,7 +2297,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return None
 
-        base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant_clean)
+        base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant_clean, self.bot.sheet_cache)
         if base_cost_resolution.base_price is None:
             await interaction.response.send_message(
                 base_cost_error_text(sheet_item, base_cost_resolution),
@@ -2345,8 +2364,10 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return None
         variant_clean = (variant or "").strip() or None
         details_clean = (details or "").strip() or None
-        is_template = is_generic_template_item(sheet_item) or base_cost_requires_variant(
-            getattr(sheet_item, "base_price_text", "")
+        is_template = (
+            is_generic_template_item(sheet_item)
+            or base_cost_requires_variant(getattr(sheet_item, "base_price_text", ""))
+            or self.bot.sheet_cache.item_requires_pricing_variant(sheet_item)
         )
         if variant_clean and not is_template:
             await interaction.response.send_message(
@@ -2686,7 +2707,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             selection = pick_weighted_item(final_pool)
             sheet_item = selection.item
             listing_name, variant, variant_note = resolve_random_stock_identity(sheet_item)
-            base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant)
+            base_cost_resolution = resolve_sheet_item_base_price(sheet_item, variant, self.bot.sheet_cache)
             if base_cost_resolution.base_price is None:
                 slot_type = "Consumable" if consumable else "Permanent"
                 audit_lines.append(
@@ -4308,6 +4329,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             "Google Sheet cache reloaded.\n\n"
             f"* Bot Items rows loaded: {len(self.bot.sheet_cache.items)}\n"
             f"* Monster Component rows loaded: {len(self.bot.sheet_cache.components)}\n"
+            f"* Mundane Item Reference rows loaded: {len(self.bot.sheet_cache.mundane_items)}\n"
+            f"* Pricing Template Rules rows loaded: {len(self.bot.sheet_cache.pricing_rules)}\n"
             f"* Validation warnings:\n{warning_text}"
         )
         await interaction.followup.send(output, ephemeral=True)
