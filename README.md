@@ -59,6 +59,7 @@ ADMIN_ROLE_NAMES=Admin,Moderator,DM,Loot Manager
 
 DWARFY_SELL_CHANNEL_ID=your_sell_channel_id
 DWARFY_SHOP_CHANNEL_ID=your_shop_channel_id
+DWARFY_CLASSIFIED_CHANNEL_ID=your_classifieds_channel_id_or_blank
 SESSION_LOOT_CHANNEL_ID=your_session_loot_channel_id_or_blank
 DEATH_UNRESOLVED_LOG_CHANNEL_ID=your_death_and_unresolved_log_channel_id_or_blank
 
@@ -71,6 +72,8 @@ DATABASE_PATH=data/dwarfy.sqlite
 ```
 
 `SESSION_LOOT_CHANNEL_ID` may be left blank. If it is blank, `/sessionloot` works in any channel.
+
+`DWARFY_CLASSIFIED_CHANNEL_ID` may be left blank. If it is blank, classifieds commands fall back to `DWARFY_SHOP_CHANNEL_ID`.
 
 `DEATH_UNRESOLVED_LOG_CHANNEL_ID` may be left blank. If it is filled in, Dwarfy automatically posts unresolved debt/jail consequences there when a buyer cannot cover the final item price.
 
@@ -417,7 +420,8 @@ Owner-stocked listings are marked separately in SQLite with `stock_source=owner_
 ## Channel Rules
 
 - `/dwarfy sell` and `/dwarfy broker` only work in `DWARFY_SELL_CHANNEL_ID`.
-- `/dwarfy browse`, `/dwarfy inspect`, `/dwarfy buy`, and Dwarfy Classifieds commands only work in `DWARFY_SHOP_CHANNEL_ID`.
+- `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy` only work in `DWARFY_SHOP_CHANNEL_ID`.
+- Dwarfy Classifieds commands only work in `DWARFY_CLASSIFIED_CHANNEL_ID` if configured. If that value is blank, they fall back to `DWARFY_SHOP_CHANNEL_ID`.
 - `/sessionloot` only checks `SESSION_LOOT_CHANNEL_ID` if that value is filled in.
 
 Wrong-channel errors are private.
@@ -445,6 +449,8 @@ Once `/dwarfy buy` is submitted and the listing is valid, the deal is final. If 
 Dwarfy Classifieds is a player-to-player board. Dwarfy does not own the item and it does not enter shop inventory.
 
 `/dwarfy classified_post` lets a player post a magic item from `Bot Items` with an asking price. The item field autocompletes clean sheet item names. Generic/template items can use `variant`.
+
+Dwarfy takes custody of the item for 30 days from posting. During that hold, the seller cannot use, sell, trade, or withdraw the item. If nobody buys it within 30 days, the bot returns the item to the seller for free and posts a return notice in the classifieds channel.
 
 Dwarfy adds a buyer-paid `20%` broker fee:
 

@@ -7,12 +7,12 @@ import csv
 import io
 import random
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from services.pricing import (
     buy_price_formula,
@@ -66,6 +66,8 @@ BROWSE_PAGE_SIZE = 10
 DEFAULT_RANDOM_PERMANENT_COUNT = 10
 DEFAULT_RANDOM_CONSUMABLE_COUNT = 15
 CLASSIFIED_FEE_PERCENT = 20
+CLASSIFIED_HOLD_DAYS = 30
+CLASSIFIED_RETURN_CHECK_HOURS = 24
 RARITY_COLORS = {
     "Common": 0x8A8F98,
     "Uncommon": 0x2ECC71,
@@ -216,6 +218,43 @@ def age_text(value: str | None) -> str:
         return f"{hours} hour{'s' if hours != 1 else ''} ago"
     days = hours // 24
     return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def timestamp_text(value: str | None) -> str:
+    """Return a simple UTC timestamp for Discord audit text."""
+    parsed = parse_utc_datetime(value)
+    if parsed is None:
+        return "unknown"
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def is_classified_expired(classified: dict[str, Any]) -> bool:
+    """Return True if an open classified is past its escrow deadline."""
+    expires_at = parse_utc_datetime(classified.get("expires_at"))
+    if expires_at is None:
+        return False
+    return expires_at <= datetime.now(timezone.utc)
+
+
+def classified_status_text(classified: dict[str, Any]) -> str:
+    """Return player-facing classified status."""
+    if classified.get("returned_at"):
+        return "Returned to seller"
+    if classified.get("status") == "sold":
+        return "Sold"
+    if classified.get("status") == "voided":
+        return "Voided"
+    if is_classified_expired(classified):
+        return "Expired, return pending"
+    return "Open, held by Dwarfy"
+
+
+def classified_hold_text(classified: dict[str, Any]) -> str:
+    """Return the 30-day escrow line for one classified."""
+    return (
+        f"Held by Dwarfy until {timestamp_text(classified.get('expires_at'))}. "
+        "The seller cannot use, sell, trade, or withdraw it during the hold."
+    )
 
 
 def rarity_color(rarity: str | None) -> discord.Color:
@@ -952,11 +991,12 @@ def build_classified_embed(classified: dict[str, Any]) -> discord.Embed:
     )
     embed.add_field(name="Rarity", value=classified.get("rarity") or "Unknown", inline=True)
     embed.add_field(name="Source", value=source_with_page(classified.get("source"), classified.get("page")), inline=True)
-    embed.add_field(name="Status", value=classified.get("status") or "unknown", inline=True)
+    embed.add_field(name="Status", value=classified_status_text(classified), inline=True)
     embed.add_field(name="Seller", value=f"{seller} as {seller_character}", inline=False)
     embed.add_field(name="Seller Receives", value=gp(int(classified.get("asking_price") or 0)), inline=True)
     embed.add_field(name="Dwarfy Fee", value=gp(int(classified.get("broker_fee") or 0)), inline=True)
     embed.add_field(name="Buyer Total", value=gp(int(classified.get("buyer_total") or 0)), inline=True)
+    embed.add_field(name="Escrow Hold", value=classified_hold_text(classified), inline=False)
     if classified.get("variant"):
         embed.add_field(name="Variant", value=classified["variant"], inline=True)
     if classified.get("details"):
@@ -977,6 +1017,7 @@ def build_classified_browse_output(classifieds: list[dict[str, Any]]) -> str:
                     f"Dwarfy fee: {gp(int(classified['broker_fee']))} | "
                     f"Buyer total: {gp(int(classified['buyer_total']))}"
                 ),
+                classified_hold_text(classified),
                 "",
             ]
         )
@@ -1009,6 +1050,24 @@ def build_classified_trade_log(
         f"Dwarfy's Shop receives {gp(int(classified['broker_fee']))} from {buyer} as {buyer_character} "
         f"for brokering {item_name}.\n\n"
         "Trade status: Final once both players update their logs."
+    )
+
+
+def build_classified_return_notice(classified: dict[str, Any]) -> str:
+    """Build the public notice when a classified escrow expires."""
+    seller = mention_user(classified.get("seller_user_id"), classified.get("seller_display_name"))
+    seller_character = character_label(
+        classified.get("seller_character_name"),
+        classified.get("seller_character_level"),
+    )
+    return (
+        "Dwarfy Classifieds Return Notice\n\n"
+        f"{classified['classified_id']} - {classified_display_name(classified)} has reached the end of its "
+        f"{CLASSIFIED_HOLD_DAYS}-day classified hold.\n\n"
+        f"Dwarfy returns the item to {seller} as {seller_character}.\n"
+        "No sale occurred.\n"
+        "No broker fee was charged.\n\n"
+        "Status: Returned to seller."
     )
 
 
@@ -1143,6 +1202,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
                 "The seller receives the listed price.",
                 f"Dwarfy adds a {CLASSIFIED_FEE_PERCENT}% broker fee paid by the buyer.",
                 "The item does not enter Dwarfy inventory.",
+                f"Dwarfy holds the item for {CLASSIFIED_HOLD_DAYS} days; the seller cannot use, sell, trade, or withdraw it during that hold.",
             ],
         )
         _help_field(
@@ -1224,6 +1284,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             [
                 "`/dwarfy sell` and `/dwarfy broker` use the configured sell channel.",
                 "Shop commands use the configured shop channel.",
+                "Classified commands use the configured classifieds channel, falling back to the shop channel if none is set.",
                 "`/sessionloot` uses the session loot channel only if one is configured.",
                 "Wrong-channel errors are private.",
             ],
@@ -1288,6 +1349,72 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         super().__init__()
+
+    async def cog_load(self) -> None:
+        self._classified_return_loop.start()
+
+    def cog_unload(self) -> None:
+        self._classified_return_loop.cancel()
+
+    def _classified_channel_id(self) -> int | None:
+        """Return the dedicated classified channel, falling back to shop."""
+        return (
+            self.bot.config.dwarfy_classified_channel_id
+            or self.bot.config.dwarfy_shop_channel_id
+        )
+
+    async def _require_classified_channel(self, interaction: discord.Interaction) -> bool:
+        channel_id = self._classified_channel_id()
+        if channel_id is None:
+            await interaction.response.send_message(
+                "Dwarfy Classifieds is not configured yet. Set DWARFY_CLASSIFIED_CHANNEL_ID or DWARFY_SHOP_CHANNEL_ID in `.env`.",
+                ephemeral=True,
+            )
+            return False
+        if interaction.channel_id != channel_id:
+            await interaction.response.send_message(
+                "Dwarfy points at the classifieds board. Please use this command in the configured Dwarfy Classifieds channel.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _classified_notice_channel(self) -> discord.abc.Messageable | None:
+        channel_id = self._classified_channel_id()
+        if channel_id is None:
+            return None
+        channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        return channel if hasattr(channel, "send") else None
+
+    async def _process_expired_classifieds(self) -> None:
+        """Return expired classifieds and post any missing return notices."""
+        expired_rows = await self.bot.db.expired_open_classifieds()
+        for row in expired_rows:
+            returned = await self.bot.db.return_expired_classified(row["classified_id"])
+            if returned:
+                print(f"[classifieds] Returned expired classified {returned['classified_id']}.")
+
+        pending_notices = await self.bot.db.classified_return_notices_pending()
+        if not pending_notices:
+            return
+        channel = await self._classified_notice_channel()
+        if channel is None:
+            print("[classifieds] Return notices pending, but no classified/shop channel is configured.")
+            return
+        for row in pending_notices:
+            await channel.send(build_classified_return_notice(row))
+            await self.bot.db.mark_classified_return_notice_sent(row["classified_id"])
+
+    @tasks.loop(hours=CLASSIFIED_RETURN_CHECK_HOURS)
+    async def _classified_return_loop(self) -> None:
+        try:
+            await self._process_expired_classifieds()
+        except Exception as exc:
+            print(f"[classifieds] Expired classified return check failed: {exc}")
+
+    @_classified_return_loop.before_loop
+    async def _before_classified_return_loop(self) -> None:
+        await self.bot.wait_until_ready()
 
     def _is_admin_or_mod(self, interaction: discord.Interaction) -> bool:
         member = interaction.user
@@ -1656,11 +1783,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         details: str | None,
     ) -> dict[str, Any] | None:
         """Validate a player-posted classified item."""
-        if not await self._require_channel(
-            interaction,
-            self.bot.config.dwarfy_shop_channel_id,
-            "DWARFY_SHOP_CHANNEL_ID",
-        ):
+        if not await self._require_classified_channel(interaction):
             return None
         if not await self._require_sheet_cache(interaction):
             return None
@@ -2403,11 +2526,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         max_price: int | None = None,
         search: str | None = None,
     ) -> None:
-        if not await self._require_channel(
-            interaction,
-            self.bot.config.dwarfy_shop_channel_id,
-            "DWARFY_SHOP_CHANNEL_ID",
-        ):
+        if not await self._require_classified_channel(interaction):
             return
         if max_price is not None and max_price < 0:
             await interaction.response.send_message(
@@ -2461,11 +2580,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     @app_commands.command(name="inspect", description="Inspect one Dwarfy listing.")
     @app_commands.describe(listing="Listing ID, such as DWF-00017.")
     async def inspect(self, interaction: discord.Interaction, listing: str) -> None:
-        if not await self._require_channel(
-            interaction,
-            self.bot.config.dwarfy_shop_channel_id,
-            "DWARFY_SHOP_CHANNEL_ID",
-        ):
+        if not await self._require_classified_channel(interaction):
             return
         listing_id = parse_listing_id(listing)
         if listing_id is None:
@@ -2788,11 +2903,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         level: app_commands.Range[int, 1, 20],
         gold: app_commands.Range[int, 0, 10_000_000],
     ) -> None:
-        if not await self._require_channel(
-            interaction,
-            self.bot.config.dwarfy_shop_channel_id,
-            "DWARFY_SHOP_CHANNEL_ID",
-        ):
+        if not await self._require_classified_channel(interaction):
             return
         listing_id = parse_listing_id(listing)
         if listing_id is None:
@@ -2904,7 +3015,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Seller receives: {gp(asking_price)}",
             f"Dwarfy broker fee: {gp(broker_fee)} ({CLASSIFIED_FEE_PERCENT}%, paid by the buyer)",
             f"Buyer total: {gp(buyer_total)}",
-            "Status: Open",
+            f"Escrow: {classified_hold_text(row)}",
+            "Status: Open, held by Dwarfy",
         ]
         if context["variant_note"]:
             lines.append(context["variant_note"])
@@ -2915,6 +3027,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         lines.extend(
             [
                 "",
+                "Seller reminder: this item is in Dwarfy's custody during the hold. Do not use, sell, trade, or withdraw it unless it is returned.",
                 "A buyer can run `/dwarfy classified_buy` with the posting ID to generate the trade-log text.",
             ]
         )
@@ -2959,11 +3072,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         rarity: str | None = None,
         search: str | None = None,
     ) -> None:
-        if not await self._require_channel(
-            interaction,
-            self.bot.config.dwarfy_shop_channel_id,
-            "DWARFY_SHOP_CHANNEL_ID",
-        ):
+        if not await self._require_classified_channel(interaction):
             return
         rarity_filter = normalize_rarity(rarity) if rarity else None
         if rarity_filter and rarity_filter not in BROWSE_RARITY_VALUES:
@@ -3008,11 +3117,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     @app_commands.command(name="classified_inspect", description="Privately inspect one Dwarfy Classifieds posting.")
     @app_commands.describe(classified="Classified ID, such as DWC-00017.")
     async def classified_inspect(self, interaction: discord.Interaction, classified: str) -> None:
-        if not await self._require_channel(
-            interaction,
-            self.bot.config.dwarfy_shop_channel_id,
-            "DWARFY_SHOP_CHANNEL_ID",
-        ):
+        if not await self._require_classified_channel(interaction):
             return
         classified_id = parse_classified_id(classified)
         if classified_id is None:
@@ -3043,11 +3148,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         character: str,
         level: app_commands.Range[int, 1, 20],
     ) -> None:
-        if not await self._require_channel(
-            interaction,
-            self.bot.config.dwarfy_shop_channel_id,
-            "DWARFY_SHOP_CHANNEL_ID",
-        ):
+        if not await self._require_classified_channel(interaction):
             return
         classified_id = parse_classified_id(classified)
         if classified_id is None:
@@ -3064,8 +3165,15 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
         if row["status"] != "open":
+            status_text = classified_status_text(row).casefold()
             await interaction.response.send_message(
-                f"`{row['classified_id']}` is already {row['status']} and cannot be bought.",
+                f"`{row['classified_id']}` is already {status_text} and cannot be bought.",
+                ephemeral=True,
+            )
+            return
+        if is_classified_expired(row):
+            await interaction.response.send_message(
+                f"`{row['classified_id']}` has reached the end of its {CLASSIFIED_HOLD_DAYS}-day hold and is being returned to the seller.",
                 ephemeral=True,
             )
             return

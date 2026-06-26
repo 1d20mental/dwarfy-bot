@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,16 @@ import aiosqlite
 def utc_now_text() -> str:
     """Store timestamps in one predictable UTC format."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_utc_text(value: str | None) -> datetime:
+    """Parse stored timestamps and assume UTC when old data is naive."""
+    if not value:
+        return datetime.now(timezone.utc)
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class DwarfyDatabase:
@@ -175,6 +185,9 @@ class DwarfyDatabase:
                 buyer_character_level INTEGER,
                 trade_log_text TEXT,
                 created_at TEXT NOT NULL,
+                expires_at TEXT,
+                returned_at TEXT,
+                return_notice_sent_at TEXT,
                 sold_at TEXT,
                 voided_at TEXT,
                 void_reason TEXT
@@ -182,6 +195,7 @@ class DwarfyDatabase:
             """
         )
         await self._migrate_listings_table()
+        await self._migrate_classifieds_table()
         await self.db.commit()
 
     async def _migrate_listings_table(self) -> None:
@@ -239,6 +253,34 @@ class DwarfyDatabase:
         for column, statement in migrations.items():
             if column not in existing_columns:
                 await self.db.execute(statement)
+
+    async def _migrate_classifieds_table(self) -> None:
+        """Add classifieds escrow columns without rebuilding the table."""
+        cursor = await self.db.execute("PRAGMA table_info(classifieds)")
+        existing_columns = {row["name"] for row in await cursor.fetchall()}
+        migrations = {
+            "expires_at": "ALTER TABLE classifieds ADD COLUMN expires_at TEXT",
+            "returned_at": "ALTER TABLE classifieds ADD COLUMN returned_at TEXT",
+            "return_notice_sent_at": "ALTER TABLE classifieds ADD COLUMN return_notice_sent_at TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in existing_columns:
+                await self.db.execute(statement)
+
+        cursor = await self.db.execute(
+            """
+            SELECT id, created_at FROM classifieds
+            WHERE expires_at IS NULL
+            """
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            created_at = _parse_utc_text(row["created_at"])
+            expires_at = (created_at + timedelta(days=30)).isoformat(timespec="seconds")
+            await self.db.execute(
+                "UPDATE classifieds SET expires_at = ? WHERE id = ?",
+                (expires_at, row["id"]),
+            )
 
     async def create_listing(
         self,
@@ -902,7 +944,9 @@ class DwarfyDatabase:
         json_notes: str | None = None,
         item_tags: str | None = None,
     ) -> dict[str, Any]:
-        now = utc_now_text()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat(timespec="seconds")
+        expires_at = (now_dt + timedelta(days=30)).isoformat(timespec="seconds")
         cursor = await self.db.execute(
             """
             INSERT INTO classifieds (
@@ -912,9 +956,9 @@ class DwarfyDatabase:
                 display_detail, short_description, rules_text, json_notes, item_tags,
                 seller_user_id, seller_display_name, seller_character_name,
                 seller_character_level, asking_price, broker_fee, buyer_total,
-                status, created_at
+                status, created_at, expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
             """,
             (
                 None,
@@ -946,6 +990,7 @@ class DwarfyDatabase:
                 broker_fee,
                 buyer_total,
                 now,
+                expires_at,
             ),
         )
         row_id = cursor.lastrowid
@@ -979,12 +1024,47 @@ class DwarfyDatabase:
         return dict(row) if row else None
 
     async def list_open_classifieds(self) -> list[dict[str, Any]]:
+        now = utc_now_text()
         cursor = await self.db.execute(
             """
             SELECT * FROM classifieds
             WHERE status = 'open'
+              AND returned_at IS NULL
+              AND (expires_at IS NULL OR expires_at > ?)
             ORDER BY id ASC
+            """,
+            (now,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def expired_open_classifieds(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        """Return open classifieds whose 30-day escrow has expired."""
+        now = utc_now_text()
+        cursor = await self.db.execute(
             """
+            SELECT * FROM classifieds
+            WHERE status = 'open'
+              AND returned_at IS NULL
+              AND expires_at IS NOT NULL
+              AND expires_at <= ?
+            ORDER BY expires_at ASC, id ASC
+            LIMIT ?
+            """,
+            (now, max(1, min(int(limit), 100))),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def classified_return_notices_pending(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        """Return returned classifieds whose public return notice has not posted."""
+        cursor = await self.db.execute(
+            """
+            SELECT * FROM classifieds
+            WHERE returned_at IS NOT NULL
+              AND return_notice_sent_at IS NULL
+            ORDER BY returned_at ASC, id ASC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 100)),),
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -1002,6 +1082,10 @@ class DwarfyDatabase:
         if classified is None or classified["status"] != "open":
             return False
         now = utc_now_text()
+        if classified.get("returned_at"):
+            return False
+        if classified.get("expires_at") and classified["expires_at"] <= now:
+            return False
         cursor = await self.db.execute(
             """
             UPDATE classifieds
@@ -1012,7 +1096,10 @@ class DwarfyDatabase:
                 buyer_character_level = ?,
                 trade_log_text = ?,
                 sold_at = ?
-            WHERE UPPER(classified_id) = UPPER(?) AND status = 'open'
+            WHERE UPPER(classified_id) = UPPER(?)
+              AND status = 'open'
+              AND returned_at IS NULL
+              AND (expires_at IS NULL OR expires_at > ?)
             """,
             (
                 buyer_user_id,
@@ -1022,6 +1109,7 @@ class DwarfyDatabase:
                 trade_log_text,
                 now,
                 classified_id,
+                now,
             ),
         )
         if cursor.rowcount != 1:
@@ -1039,6 +1127,60 @@ class DwarfyDatabase:
         )
         await self.db.commit()
         return True
+
+    async def return_expired_classified(self, classified_id: str) -> dict[str, Any] | None:
+        """Mark an expired open classified as returned to the seller."""
+        classified = await self.get_classified(classified_id)
+        now = utc_now_text()
+        if (
+            classified is None
+            or classified["status"] != "open"
+            or classified.get("returned_at")
+            or not classified.get("expires_at")
+            or classified["expires_at"] > now
+        ):
+            return None
+        reason = "30-day classified hold expired; item returned to seller."
+        cursor = await self.db.execute(
+            """
+            UPDATE classifieds
+            SET status = 'voided',
+                returned_at = ?,
+                voided_at = ?,
+                void_reason = ?
+            WHERE UPPER(classified_id) = UPPER(?)
+              AND status = 'open'
+              AND returned_at IS NULL
+            """,
+            (now, now, reason, classified_id),
+        )
+        if cursor.rowcount != 1:
+            await self.db.rollback()
+            return None
+        await self.add_ledger_entry(
+            entry_type="classified_return",
+            listing_id=classified["classified_id"],
+            item_name=classified["item_name"],
+            cash_change=0,
+            inventory_cost_change=0,
+            profit_change=0,
+            notes=reason,
+            commit=False,
+        )
+        await self.db.commit()
+        return await self.get_classified(classified_id)
+
+    async def mark_classified_return_notice_sent(self, classified_id: str) -> None:
+        """Record that the public return notice has been posted."""
+        await self.db.execute(
+            """
+            UPDATE classifieds
+            SET return_notice_sent_at = ?
+            WHERE UPPER(classified_id) = UPPER(?)
+            """,
+            (utc_now_text(), classified_id),
+        )
+        await self.db.commit()
 
     async def void_classified(self, classified_id: str, reason: str) -> dict[str, Any] | None:
         classified = await self.get_classified(classified_id)

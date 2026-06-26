@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1529,6 +1530,7 @@ class ClassifiedsTests(unittest.TestCase):
             "asking_price": 160,
             "broker_fee": 32,
             "buyer_total": 192,
+            "expires_at": "2026-07-26T00:00:00+00:00",
         }
 
         output = build_classified_browse_output([row])
@@ -1536,6 +1538,7 @@ class ClassifiedsTests(unittest.TestCase):
         self.assertIn("Dwarfy's Classifieds has 1 open posting", output)
         self.assertIn("DWC-00001 - +1 Weapon (Longsword) - Uncommon", output)
         self.assertIn("Buyer total: 192gp", output)
+        self.assertIn("Held by Dwarfy until", output)
 
     def test_classified_database_flow_records_fee_ledger_and_export(self):
         from services.database import DwarfyDatabase
@@ -1587,9 +1590,89 @@ class ClassifiedsTests(unittest.TestCase):
         self.assertTrue(sold)
         self.assertEqual(fetched["status"], "sold")
         self.assertEqual(fetched["buyer_character_name"], "Azaez")
+        self.assertIsNotNone(row["expires_at"])
+        self.assertIsNone(fetched["returned_at"])
         self.assertEqual(history[0]["cash_change"], 82)
         self.assertEqual(history[0]["profit_change"], 82)
         self.assertEqual(exported[0]["trade_log_text"], "trade log")
+
+    def test_expired_classified_is_returned_and_no_longer_buyable(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_classified(
+                        item_name="Tentacle Rod",
+                        item_clean_name="Tentacle Rod",
+                        rarity="Rare",
+                        source="DMG 2024",
+                        category="Rod",
+                        tags="rod",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Beto Dread",
+                        seller_character_level=9,
+                        asking_price=410,
+                        broker_fee=82,
+                        buyer_total=492,
+                    )
+                    expired_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+                    await db.db.execute(
+                        "UPDATE classifieds SET expires_at = ? WHERE classified_id = ?",
+                        (expired_at, row["classified_id"]),
+                    )
+                    await db.db.commit()
+
+                    open_before_return = await db.list_open_classifieds()
+                    expired = await db.expired_open_classifieds()
+                    returned = await db.return_expired_classified(row["classified_id"])
+                    sold = await db.mark_classified_sold(
+                        classified_id=row["classified_id"],
+                        buyer_user_id="456",
+                        buyer_display_name="Buyer",
+                        buyer_character_name="Azaez",
+                        buyer_character_level=3,
+                        trade_log_text="trade log",
+                    )
+                    pending = await db.classified_return_notices_pending()
+                    await db.mark_classified_return_notice_sent(row["classified_id"])
+                    fetched = await db.get_classified(row["classified_id"])
+                finally:
+                    await db.close()
+                return open_before_return, expired, returned, sold, pending, fetched
+
+        open_before_return, expired, returned, sold, pending, fetched = asyncio.run(run_case())
+
+        self.assertEqual(open_before_return, [])
+        self.assertEqual([row["classified_id"] for row in expired], ["DWC-00001"])
+        self.assertEqual(returned["status"], "voided")
+        self.assertIsNotNone(returned["returned_at"])
+        self.assertFalse(sold)
+        self.assertEqual([row["classified_id"] for row in pending], ["DWC-00001"])
+        self.assertIsNotNone(fetched["return_notice_sent_at"])
+
+    def test_classified_return_notice_explains_free_return(self):
+        from cogs.dwarfy import build_classified_return_notice
+
+        row = {
+            "classified_id": "DWC-00001",
+            "item_name": "Ring of Protection",
+            "listing_display_name": "Ring of Protection",
+            "seller_user_id": "123",
+            "seller_display_name": "Seller",
+            "seller_character_name": "Beto",
+            "seller_character_level": 9,
+        }
+
+        output = build_classified_return_notice(row)
+
+        self.assertIn("Dwarfy Classifieds Return Notice", output)
+        self.assertIn("DWC-00001 - Ring of Protection", output)
+        self.assertIn("No broker fee was charged", output)
+        self.assertIn("Status: Returned to seller", output)
 
     def test_void_classified_keeps_record_and_removes_open_listing(self):
         from services.database import DwarfyDatabase

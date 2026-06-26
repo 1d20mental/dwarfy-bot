@@ -32,6 +32,7 @@ class BotConfig:
     admin_role_names: set[str]
     dwarfy_sell_channel_id: int | None
     dwarfy_shop_channel_id: int | None
+    dwarfy_classified_channel_id: int | None
     session_loot_channel_id: int | None
     death_unresolved_log_channel_id: int | None
     google_sheet_id: str
@@ -53,6 +54,7 @@ class BotConfig:
             admin_role_names=admin_roles,
             dwarfy_sell_channel_id=_optional_int(os.getenv("DWARFY_SELL_CHANNEL_ID")),
             dwarfy_shop_channel_id=_optional_int(os.getenv("DWARFY_SHOP_CHANNEL_ID")),
+            dwarfy_classified_channel_id=_optional_int(os.getenv("DWARFY_CLASSIFIED_CHANNEL_ID")),
             session_loot_channel_id=_optional_int(os.getenv("SESSION_LOOT_CHANNEL_ID")),
             death_unresolved_log_channel_id=_optional_int(os.getenv("DEATH_UNRESOLVED_LOG_CHANNEL_ID")),
             google_sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip(),
