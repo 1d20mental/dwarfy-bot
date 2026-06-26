@@ -461,7 +461,7 @@ The bot first rolls the normal Xanathar-style asking price for the item's rarity
 - `2-14`: no discount.
 - `1`: no discount and Dwarfy insults the buyer, but there is no mechanical penalty.
 
-The haggling roll can only reduce the item price. The final item price can never be below Dwarfy's cost basis. `/dwarfy buy` has no DTP cost and no flat shop/search expense; only the final item price matters.
+The haggling roll can only reduce the item price. Dwarfy normally refuses to sell below his cost basis, but a natural 20 haggling roll is the one exception: on a 20, the 20% discounted price can go below what Dwarfy paid. `/dwarfy buy` has no DTP cost and no flat shop/search expense; only the final item price matters.
 
 Once `/dwarfy buy` is submitted and the listing is valid, the deal is final. If the final item price is higher than the declared gold, the bot still marks the item as sold to that character. The character owes the shortfall plus a `5,000gp` contract-default fine, is jailed/unplayable until that debt is paid, and cannot sell or trade the item until the debt is cleared. If `DEATH_UNRESOLVED_LOG_CHANNEL_ID` is set, Dwarfy posts that consequence automatically to the unresolved log channel. Admins/mods can later run `/dwarfy debt_resolve`.
 

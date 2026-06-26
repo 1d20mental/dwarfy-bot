@@ -324,6 +324,8 @@ def buy_haggling_result_line(buy_roll: Any, cost_basis: int) -> str:
     )
     if buy_roll.cost_basis_floor_applied:
         line += f" **Dwarfy will not sell below his {gp(cost_basis)} cost basis.**"
+    elif buy_roll.cost_basis_exception_applied:
+        line += f" **Natural 20 exception: Dwarfy lets it go below his {gp(cost_basis)} cost basis.**"
     return line
 
 
@@ -909,6 +911,10 @@ def build_buy_receipt(
         lines.append(f'Dwarfy says: "{buy_roll.insult_line}"')
     if buy_roll.cost_basis_floor_applied:
         lines.append(f"Floor: Dwarfy will not sell below his {gp(int(listing['cost_basis']))} cost basis.")
+    elif buy_roll.cost_basis_exception_applied:
+        lines.append(
+            f"Natural 20 exception: Dwarfy lets this sale go below his {gp(int(listing['cost_basis']))} cost basis."
+        )
 
     lines.extend(
         [
@@ -1242,7 +1248,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
                 "`/dwarfy buy listing:DWF-00001 character:<name> level:<1-20> gold:<amount>`",
                 "Buying uses the item listing ID only.",
                 "Dwarfy rolls a Xanathar-style price, then a d20 haggling discount.",
-                "The final price never drops below Dwarfy's cost basis.",
+                "Dwarfy normally keeps his cost-basis floor, but a natural 20 can break it.",
             ],
         )
         _help_field(

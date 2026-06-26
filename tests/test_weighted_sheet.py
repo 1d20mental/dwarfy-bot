@@ -831,18 +831,29 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         self.assertEqual(result.final_price, result.rolled_price)
         self.assertEqual(debt_owed, 0)
 
-    def test_discount_never_lowers_final_price_below_cost_basis(self):
+    def test_rolls_below_nat_20_never_lower_final_price_below_cost_basis(self):
+        with patch("services.pricing.random.randint", side_effect=[2, 16]):
+            result = roll_buy_price("Uncommon", 300)
+
+        self.assertEqual(result.rolled_price, 200)
+        self.assertEqual(result.discounted_price, 180)
+        self.assertEqual(result.final_price, 300)
+        self.assertTrue(result.cost_basis_floor_applied)
+
+    def test_nat_20_can_lower_final_price_below_cost_basis(self):
         with patch("services.pricing.random.randint", side_effect=[2, 20]):
             result = roll_buy_price("Uncommon", 300)
 
         self.assertEqual(result.rolled_price, 200)
         self.assertEqual(result.discounted_price, 160)
-        self.assertEqual(result.final_price, 300)
-        self.assertTrue(result.cost_basis_floor_applied)
+        self.assertEqual(result.final_price, 160)
+        self.assertEqual(result.realized_profit, -140)
+        self.assertFalse(result.cost_basis_floor_applied)
+        self.assertTrue(result.cost_basis_exception_applied)
 
     def test_possible_buy_price_range_includes_best_haggling_discount(self):
         self.assertEqual(possible_final_price_range("Common", 0), (16, 70))
-        self.assertEqual(possible_final_price_range("Uncommon", 320), (320, 600))
+        self.assertEqual(possible_final_price_range("Uncommon", 320), (80, 600))
 
     def test_buy_receipt_has_no_dtp_or_shop_expense(self):
         from cogs.dwarfy import build_buy_receipt
@@ -903,14 +914,27 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
     def test_buy_haggling_result_line_highlights_cost_basis_floor(self):
         from cogs.dwarfy import buy_haggling_result_line
 
+        with patch("services.pricing.random.randint", side_effect=[2, 16]):
+            result = roll_buy_price("Uncommon", 300)
+
+        line = buy_haggling_result_line(result, 300)
+
+        self.assertIn("Dwarfy haggling roll: 16", line)
+        self.assertIn("Final item price: 300gp", line)
+        self.assertIn("**Dwarfy will not sell below his 300gp cost basis.**", line)
+
+    def test_buy_haggling_result_line_highlights_nat_20_floor_exception(self):
+        from cogs.dwarfy import buy_haggling_result_line
+
         with patch("services.pricing.random.randint", side_effect=[2, 20]):
             result = roll_buy_price("Uncommon", 300)
 
         line = buy_haggling_result_line(result, 300)
 
         self.assertIn("Dwarfy haggling roll: 20", line)
-        self.assertIn("Final item price: 300gp", line)
-        self.assertIn("**Dwarfy will not sell below his 300gp cost basis.**", line)
+        self.assertIn("Final item price: 160gp", line)
+        self.assertIn("**Natural 20 exception: Dwarfy lets it go below his 300gp cost basis.**", line)
+        self.assertNotIn("will not sell below", line)
 
     def test_database_stores_buy_haggling_audit_and_marks_sold(self):
         from services.database import DwarfyDatabase
@@ -1362,7 +1386,7 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertIn("Adventure Log Receipt", fetched["receipt_text"])
 
     def test_existing_buy_pricing_still_uses_floor(self):
-        self.assertEqual(possible_final_price_range("Uncommon", 320), (320, 600))
+        self.assertEqual(possible_final_price_range("Uncommon", 320), (80, 600))
         with patch("services.pricing.random.randint", return_value=1):
             roll = roll_buy_price("Uncommon", 400)
         self.assertEqual(roll.final_price, 400)

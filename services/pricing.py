@@ -54,6 +54,11 @@ class BuyRoll:
         """Return True when Dwarfy refused to sell below what he paid."""
         return self.final_price > self.discounted_price
 
+    @property
+    def cost_basis_exception_applied(self) -> bool:
+        """Return True when a nat 20 let the buyer beat Dwarfy's floor."""
+        return self.haggling_roll == 20 and self.realized_profit < 0
+
 
 DWARFY_NAT1_INSULTS = [
     "A miracle. The fool had money after all.",
@@ -152,14 +157,14 @@ def buy_price_formula(rarity: str) -> str:
 def possible_final_price_range(rarity: str, cost_basis: int) -> tuple[int, int]:
     """Return the lowest and highest possible final buy price.
 
-    Haggling can reduce the low end by up to 20%, but the floor rule means the
-    shop never sells below its cost basis.
+    Haggling can reduce the low end by up to 20%. A natural 20 is the only time
+    Dwarfy lets the final price drop below his cost basis.
     """
     if rarity not in BUY_PRICE_RANGES:
         raise ValueError(f"Unsupported rarity: {rarity}")
     roll_min, roll_max, _formula = BUY_PRICE_RANGES[rarity]
     best_discounted_min = (roll_min * 80) // 100
-    return max(best_discounted_min, cost_basis), max(roll_max, cost_basis)
+    return best_discounted_min, max(roll_max, cost_basis)
 
 
 def roll_buy_price(rarity: str, cost_basis: int) -> BuyRoll:
@@ -209,7 +214,10 @@ def roll_buy_price(rarity: str, cost_basis: int) -> BuyRoll:
         haggling_result = "Dwarfy does not budge."
 
     discounted_price = (rolled * (100 - discount_percent)) // 100
-    final_price = max(discounted_price, cost_basis)
+    if haggling_roll == 20:
+        final_price = discounted_price
+    else:
+        final_price = max(discounted_price, cost_basis)
     return BuyRoll(
         roll_detail=detail,
         rolled_price=rolled,
