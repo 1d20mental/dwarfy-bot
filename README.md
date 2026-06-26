@@ -297,6 +297,8 @@ Changing a `Weight` cell and running `/dwarfy reload` updates future session-loo
 
 If `/sessionloot` rolls a rarity that has no eligible pool for that slot type and APL, the bot automatically fills the slot from the nearest valid rarity pool. It tries higher rarities first when two fallback rarities are equally close, keeps permanent slots permanent and consumable slots consumable, and keeps the original d100 roll visible in the public output.
 
+The optional `/sessionloot` `tag` field autocompletes from session-eligible Bot Items tags. The optional `creature_type` field autocompletes from the Monster Components tab.
+
 Example:
 
 ```text

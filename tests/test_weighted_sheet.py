@@ -22,7 +22,7 @@ from services.pricing import (
     roll_broker_price,
     roll_buy_price,
 )
-from services.sheets import SheetCache, SheetItem
+from services.sheets import MonsterComponent, SheetCache, SheetItem
 
 
 class FakeWorksheet:
@@ -186,6 +186,43 @@ class SheetParsingTests(unittest.TestCase):
 
         self.assertIn("Source: **HGtMH**", output)
         self.assertNotIn("hgtmh", output)
+
+
+class SessionLootAutocompleteTests(unittest.TestCase):
+    def test_tag_autocomplete_uses_allowed_session_eligible_tags(self):
+        from cogs.sessionloot import sessionloot_tag_choices
+
+        cache = make_cache(
+            [
+                item("Allowed", tags=("undead", "utility")),
+                item("Also Allowed", tags=("undead", "weapon")),
+                item("Blocked", tags=("secret",), allowed=False),
+                item("Not Session", tags=("hidden",), session_eligible=False),
+            ]
+        )
+
+        self.assertEqual(sessionloot_tag_choices(cache, "und"), ["undead"])
+        self.assertEqual(sessionloot_tag_choices(cache, "wea"), ["weapon"])
+        self.assertNotIn("secret", sessionloot_tag_choices(cache, ""))
+        self.assertNotIn("hidden", sessionloot_tag_choices(cache, ""))
+
+    def test_creature_type_autocomplete_preserves_sheet_names(self):
+        from cogs.sessionloot import sessionloot_creature_type_choices
+
+        cache = make_cache(
+            components=[
+                MonsterComponent("Beast", "1-50", "Claw", "Example"),
+                MonsterComponent("Aberration", "1-50", "Eye", "Example"),
+                MonsterComponent("Undead", "1-50", "Dust", "Example"),
+            ]
+        )
+
+        self.assertEqual(sessionloot_creature_type_choices(cache, "bea"), ["Beast"])
+        self.assertEqual(sessionloot_creature_type_choices(cache, "ead"), ["Undead"])
+        self.assertEqual(
+            sessionloot_creature_type_choices(cache, ""),
+            ["Aberration", "Beast", "Undead"],
+        )
 
 
 class WeightedSelectionTests(unittest.TestCase):

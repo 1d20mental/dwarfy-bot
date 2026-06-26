@@ -14,6 +14,41 @@ from services.loot import (
 from utils.formatting import send_text_response
 
 
+def sessionloot_tag_choices(cache, query: str, *, limit: int = 25) -> list[str]:
+    """Return unique session loot tags from the cached Bot Items sheet."""
+    query_norm = query.casefold().strip()
+    tags: set[str] = set()
+    for item in cache.items:
+        if not item.allowed or not item.session_eligible:
+            continue
+        tags.update(item.tags)
+
+    starts = sorted(tag for tag in tags if query_norm and tag.startswith(query_norm))
+    contains = sorted(
+        tag
+        for tag in tags
+        if (not query_norm or query_norm in tag) and tag not in starts
+    )
+    return (starts + contains)[:limit]
+
+
+def sessionloot_creature_type_choices(cache, query: str, *, limit: int = 25) -> list[str]:
+    """Return creature type choices from the cached Monster Components sheet."""
+    query_norm = query.casefold().strip()
+    creature_types = cache.available_creature_types()
+    starts = [
+        creature_type
+        for creature_type in creature_types
+        if query_norm and creature_type.casefold().startswith(query_norm)
+    ]
+    contains = [
+        creature_type
+        for creature_type in creature_types
+        if (not query_norm or query_norm in creature_type.casefold()) and creature_type not in starts
+    ]
+    return (starts + contains)[:limit]
+
+
 class SessionLoot(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -74,6 +109,32 @@ class SessionLoot(commands.Cog):
             return
 
         await send_text_response(interaction, output)
+
+    @sessionloot.autocomplete("tag")
+    async def tag_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not self.bot.sheet_cache.loaded:
+            return []
+        return [
+            app_commands.Choice(name=tag[:100], value=tag[:100])
+            for tag in sessionloot_tag_choices(self.bot.sheet_cache, current)
+        ]
+
+    @sessionloot.autocomplete("creature_type")
+    async def creature_type_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not self.bot.sheet_cache.loaded:
+            return []
+        return [
+            app_commands.Choice(name=creature_type[:100], value=creature_type[:100])
+            for creature_type in sessionloot_creature_type_choices(self.bot.sheet_cache, current)
+        ]
 
 
 async def setup(bot: commands.Bot) -> None:
