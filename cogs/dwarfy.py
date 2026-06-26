@@ -239,6 +239,101 @@ def source_with_page(source: str | None, page: str | None) -> str:
     return source or "Unknown"
 
 
+def minimum_tier_for_min_apl(min_apl: int | None) -> int:
+    """Map sheet Min APL to the server's minimum item tier."""
+    if min_apl is None:
+        return 1
+    apl = int(min_apl)
+    if apl <= 4:
+        return 1
+    if apl <= 10:
+        return 2
+    if apl <= 16:
+        return 3
+    return 4
+
+
+def minimum_level_for_tier(tier: int) -> int:
+    """Return the first character level in a D&D tier."""
+    return {1: 1, 2: 5, 3: 11, 4: 17}.get(int(tier), 1)
+
+
+def character_tier(level: int) -> int:
+    """Return a character's D&D tier from level."""
+    if int(level) <= 4:
+        return 1
+    if int(level) <= 10:
+        return 2
+    if int(level) <= 16:
+        return 3
+    return 4
+
+
+def minimum_tier_text(*, min_apl: int | None = None, minimum_tier: int | None = None) -> str:
+    """Return a player-facing minimum tier label."""
+    tier = int(minimum_tier) if minimum_tier else minimum_tier_for_min_apl(min_apl)
+    return f"Tier {tier} (Level {minimum_level_for_tier(tier)}+)"
+
+
+def record_minimum_tier(record: dict[str, Any]) -> int:
+    """Return the minimum tier stored on a listing/classified row."""
+    stored_tier = record.get("minimum_tier")
+    if stored_tier not in (None, ""):
+        return int(stored_tier)
+    min_apl = record.get("min_apl")
+    return minimum_tier_for_min_apl(int(min_apl)) if min_apl not in (None, "") else 1
+
+
+def record_minimum_tier_text(record: dict[str, Any]) -> str:
+    """Return the minimum tier text for a listing/classified row."""
+    return minimum_tier_text(minimum_tier=record_minimum_tier(record))
+
+
+def sheet_item_minimum_tier_text(sheet_item: Any) -> str:
+    """Return the minimum tier text for a SheetItem."""
+    return minimum_tier_text(min_apl=sheet_item.min_apl)
+
+
+def tier_warning_text(record: dict[str, Any], *, item_name: str, character: str, level: int) -> str:
+    """Warn when a buyer's level is below the item's minimum server tier."""
+    required_tier = record_minimum_tier(record)
+    if character_tier(int(level)) >= required_tier:
+        return ""
+    return (
+        f"**Tier Warning: {item_name} is Minimum {record_minimum_tier_text(record)}. "
+        f"{character} may not use this item under server rules until Tier {required_tier}.**"
+    )
+
+
+def enrich_record_tier_from_cache(record: dict[str, Any], cache: Any) -> dict[str, Any]:
+    """Fill missing tier fields from the live sheet cache when possible.
+
+    This lets older listings created before tier storage still display useful
+    minimum-tier guidance.
+    """
+    if record.get("minimum_tier") not in (None, ""):
+        return record
+    if not getattr(cache, "loaded", False):
+        return record
+
+    for name in (
+        record.get("item_clean_name"),
+        record.get("base_item_name"),
+        record.get("item_name"),
+        record.get("listing_display_name"),
+    ):
+        if not name:
+            continue
+        match = cache.match_item(str(name), for_sell=False)
+        if match.item is None:
+            continue
+        enriched = dict(record)
+        enriched["min_apl"] = match.item.min_apl
+        enriched["minimum_tier"] = minimum_tier_for_min_apl(match.item.min_apl)
+        return enriched
+    return record
+
+
 def parse_utc_datetime(value: str | None) -> datetime | None:
     """Parse the SQLite UTC timestamp format used by Dwarfy."""
     if not value:
@@ -380,8 +475,9 @@ def build_browse_output(
             [
                 f"{listing['listing_id']} \u2014 {display_name} \u2014 {listing['rarity']}",
                 (
-                    f"Source: {listing['source'] or 'Unknown'} | Price on buy: "
-                    f"{price_range_text(low, high)} | Origin: {origin}"
+                    f"Source: {listing['source'] or 'Unknown'} | Minimum Tier: "
+                    f"{record_minimum_tier_text(listing)} | Price on buy: {price_range_text(low, high)} | "
+                    f"Origin: {origin}"
                 ),
                 "",
             ]
@@ -453,6 +549,7 @@ def build_browse_embed(
         field_name = truncate_text(f"{listing['listing_id']} - {display_name}", 256)
         field_value = (
             f"{listing['rarity']} | {listing.get('source') or 'Unknown'} | "
+            f"Minimum Tier: {record_minimum_tier_text(listing)} | "
             f"Price on buy: {price_range_text(low, high)}\n"
             f"Origin: {origin}\n"
             f"{age_line}"
@@ -578,6 +675,7 @@ def listing_rules_text(listing: dict[str, Any]) -> str:
     lines = [
         f"{listing_display_name(listing)}",
         f"Rarity: {listing.get('rarity') or 'Unknown'}",
+        f"Minimum Tier: {record_minimum_tier_text(listing)}",
         f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
     ]
     if listing.get("display_detail"):
@@ -615,6 +713,7 @@ def build_inspect_embed(listing: dict[str, Any]) -> discord.Embed:
     embed.add_field(name="Listing", value=listing["listing_id"], inline=True)
     embed.add_field(name="Rarity", value=listing.get("rarity") or "Unknown", inline=True)
     embed.add_field(name="Price on Buy", value=price_range_text(low, high), inline=True)
+    embed.add_field(name="Minimum Tier", value=record_minimum_tier_text(listing), inline=True)
     embed.add_field(name="Source", value=source_with_page(listing.get("source"), listing.get("page")), inline=True)
     embed.add_field(name="Origin", value=truncate_text(listing_origin_text(listing), 1024), inline=False)
     embed.add_field(name="Status", value=f"{status} / {item_status}", inline=True)
@@ -896,6 +995,7 @@ def build_buy_receipt(
         f"Listing: {listing['listing_id']}",
         f"Item: {item_name}",
         f"Rarity: {listing['rarity']}",
+        f"Minimum Tier: {record_minimum_tier_text(listing)}",
         f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
         f"Original source: {origin_text}",
         "",
@@ -980,6 +1080,7 @@ def build_sell_receipt(
     item_detail: str,
     source: str,
     page: str,
+    minimum_tier: str,
     base_price: int,
     dtp_cost: int,
     gold_cost: int,
@@ -1005,6 +1106,7 @@ def build_sell_receipt(
     lines.extend(
         [
             f"Rarity: {rarity}",
+            f"Minimum Tier: {minimum_tier}",
             f"Item detail: {item_detail}",
             f"Source: {source_with_page(source, page)}",
             f"Base price: {gp(base_price)}",
@@ -1064,6 +1166,7 @@ def build_classified_embed(classified: dict[str, Any]) -> discord.Embed:
         classified.get("seller_character_level"),
     )
     embed.add_field(name="Rarity", value=classified.get("rarity") or "Unknown", inline=True)
+    embed.add_field(name="Minimum Tier", value=record_minimum_tier_text(classified), inline=True)
     embed.add_field(name="Source", value=source_with_page(classified.get("source"), classified.get("page")), inline=True)
     embed.add_field(name="Status", value=classified_status_text(classified), inline=True)
     embed.add_field(name="Seller", value=f"{seller} as {seller_character}", inline=False)
@@ -1088,6 +1191,7 @@ def build_classified_browse_output(classifieds: list[dict[str, Any]]) -> str:
                 f"{classified['classified_id']} - {classified_display_name(classified)} - {classified['rarity']}",
                 (
                     f"Buyer price: {gp(classified_buyer_price(classified))} | "
+                    f"Minimum Tier: {record_minimum_tier_text(classified)} | "
                     f"Seller receives: {gp(classified_seller_net(classified))} | "
                     f"Dwarfy commission: {gp(classified_commission(classified))}"
                 ),
@@ -1249,6 +1353,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
                 "Buying uses the item listing ID only.",
                 "Dwarfy rolls a Xanathar-style price, then a d20 haggling discount.",
                 "Dwarfy normally keeps his cost-basis floor, but a natural 20 can break it.",
+                "If your level is below the item's minimum tier, the receipt shows a bold server-rule warning.",
             ],
         )
         _help_field(
@@ -1897,6 +2002,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             item_type=sheet_item.item_type or None,
             attunement=sheet_item.attunement or None,
             page=sheet_item.page or None,
+            min_apl=sheet_item.min_apl,
+            minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
             rules_text=sheet_item.rules_text or None,
@@ -2166,6 +2273,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             item_type=sheet_item.item_type or None,
             attunement=sheet_item.attunement or None,
             page=sheet_item.page or None,
+            min_apl=sheet_item.min_apl,
+            minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
             rules_text=sheet_item.rules_text or None,
@@ -2249,6 +2358,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Item: {context['listing_name']}\n"
             f"Quantity: {len(rows)}\n"
             f"Rarity: {sheet_item.rarity}\n"
+            f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
             f"Source: {source_with_page(sheet_item.source, sheet_item.page)}\n"
             f"Cost basis each: {gp(final_cost_basis)}\n"
             f"Batch: {batch_id}\n"
@@ -2550,6 +2660,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             item_detail=context["item_detail"],
             source=sheet_item.source,
             page=sheet_item.page,
+            minimum_tier=sheet_item_minimum_tier_text(sheet_item),
             base_price=sale.base_price,
             dtp_cost=0,
             gold_cost=0,
@@ -2584,10 +2695,11 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             "Gold cost: 0gp\n"
             "Roll: none\n"
             f"Result: {sale.result_text}\n"
+            f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
             f"Base price: {gp(sale.base_price)}\n"
             f"Seller payout: {gp(sale.seller_payout)}\n"
             f"Dwarfy's cost basis: {gp(sale.seller_payout)}\n"
-            "Future sale price: rolled when purchased, never below Dwarfy's cost basis\n"
+            "Future sale price: rolled when purchased; Dwarfy normally keeps his cost-basis floor except on a natural 20 haggling roll\n"
             f"Sale status: Final, no takebacks{context['variant_block']}\n\n"
             f"{receipt}\n\n"
             "Adventure log reminder:\n"
@@ -2645,6 +2757,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 item_detail=context["item_detail"],
                 source=sheet_item.source,
                 page=sheet_item.page,
+                minimum_tier=sheet_item_minimum_tier_text(sheet_item),
                 base_price=broker_roll.base_price,
                 dtp_cost=5,
                 gold_cost=25,
@@ -2664,6 +2777,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 "Gold cost: 25gp\n"
                 "Flat d20 roll: 1\n"
                 f"Result: {broker_roll.result_text}\n"
+                f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
                 f"Base price: {gp(broker_roll.base_price)}\n"
                 "Seller payout: 0gp\n"
                 "Dwarfy's cost basis: 0gp\n"
@@ -2692,6 +2806,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             item_detail=context["item_detail"],
             source=sheet_item.source,
             page=sheet_item.page,
+            minimum_tier=sheet_item_minimum_tier_text(sheet_item),
             base_price=broker_roll.base_price,
             dtp_cost=5,
             gold_cost=25,
@@ -2729,10 +2844,11 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             "Gold cost: 25gp\n"
             f"Flat d20 roll: {broker_roll.roll}\n"
             f"Result: {broker_roll.result_text}\n"
+            f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
             f"Base price: {gp(broker_roll.base_price)}\n"
             f"Seller payout: {gp(broker_roll.seller_payout)}\n"
             f"Dwarfy's cost basis: {gp(broker_roll.seller_payout)}\n"
-            "Future sale price: rolled when purchased, never below Dwarfy's cost basis\n"
+            "Future sale price: rolled when purchased; Dwarfy normally keeps his cost-basis floor except on a natural 20 haggling roll\n"
             f"Sale status: Final, no takebacks{context['variant_block']}\n\n"
             f"{receipt}\n\n"
             "Adventure log reminder:\n"
@@ -2837,6 +2953,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         filtered: list[tuple[dict[str, Any], int, int]] = []
         for listing in listings:
+            listing = enrich_record_tier_from_cache(listing, self.bot.sheet_cache)
             if rarity_filter and listing["rarity"] != rarity_filter:
                 continue
             searchable = " ".join(
@@ -2887,6 +3004,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return
+        row = enrich_record_tier_from_cache(row, self.bot.sheet_cache)
 
         await interaction.response.send_message(
             embed=build_inspect_embed(row),
@@ -2922,6 +3040,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         lines.extend(
             [
                 f"Rarity: {listing['rarity']}",
+                f"Minimum Tier: {record_minimum_tier_text(listing)}",
                 f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
                 f"Category: {listing['category'] or 'none'}",
                 f"Tags: {listing['tags'] or 'none'}",
@@ -3073,6 +3192,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return
+        row = enrich_record_tier_from_cache(row, self.bot.sheet_cache)
         await self._finish_buy(interaction, row=row, character=character, level=level, gold=gold)
 
     async def _finish_buy(
@@ -3092,6 +3212,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         buyer = interaction.user.mention
         buyer_character = character_label(character, int(level))
         origin = listing_origin_text(row)
+        tier_warning = tier_warning_text(
+            row,
+            item_name=item_name,
+            character=buyer_character,
+            level=int(level),
+        )
         debt_owed = max(0, buy_roll.final_price - gold_available)
         debt_fine = 5_000 if debt_owed else 0
         debt_total = debt_owed + debt_fine
@@ -3171,6 +3297,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         output = (
             f"{buyer} buys {item_name} from Dwarfy's Shop.\n\n"
+            f"{tier_warning + chr(10) + chr(10) if tier_warning else ''}"
             f"{buy_haggling_result_line(buy_roll, cost_basis)}\n\n"
             f"{payment_lines}\n\n"
             f"{receipt}{debt_block}\n\n"
@@ -3288,6 +3415,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             item_type=sheet_item.item_type or None,
             attunement=sheet_item.attunement or None,
             page=sheet_item.page or None,
+            min_apl=sheet_item.min_apl,
+            minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
             rules_text=sheet_item.rules_text or None,
@@ -3316,6 +3445,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Seller: {interaction.user.mention} as {character_label(character, int(level))}",
             f"Item: {classified_display_name(row)}",
             f"Rarity: {sheet_item.rarity}",
+            f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}",
             f"Source: {source_with_page(sheet_item.source, sheet_item.page)}",
             f"Buyer price: {gp(asking_price)}",
             f"Dwarfy commission: {gp(broker_fee)} ({CLASSIFIED_FEE_PERCENT}%, withheld from seller payout)",
@@ -3398,6 +3528,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         rows = await self.bot.db.list_open_classifieds()
         filtered: list[dict[str, Any]] = []
         for row in rows:
+            row = enrich_record_tier_from_cache(row, self.bot.sheet_cache)
             if rarity_filter and row["rarity"] != rarity_filter:
                 continue
             searchable = " ".join(
@@ -3446,6 +3577,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return
+        row = enrich_record_tier_from_cache(row, self.bot.sheet_cache)
         await interaction.response.send_message(embed=build_classified_embed(row), ephemeral=True)
 
     @app_commands.command(name="classified_buy", description="Buy a player-posted item from Dwarfy's Classifieds.")
@@ -3477,6 +3609,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return
+        row = enrich_record_tier_from_cache(row, self.bot.sheet_cache)
         if row["status"] != "open":
             status_text = classified_status_text(row).casefold()
             await interaction.response.send_message(
@@ -3493,6 +3626,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         buyer = interaction.user.mention
         buyer_character = character_label(character, int(level))
         trade_log = build_classified_trade_log(row, buyer=buyer, buyer_character=buyer_character)
+        tier_warning = tier_warning_text(
+            row,
+            item_name=classified_display_name(row),
+            character=buyer_character,
+            level=int(level),
+        )
         sold = await self.bot.db.mark_classified_sold(
             classified_id=row["classified_id"],
             buyer_user_id=str(interaction.user.id),
@@ -3511,10 +3650,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         output = (
             f"{buyer} buys {classified_display_name(row)} through Dwarfy's Classifieds.\n\n"
+            f"{tier_warning + chr(10) + chr(10) if tier_warning else ''}"
             "Dwarfy Classifieds Receipt:\n"
             f"Posting: {row['classified_id']}\n"
             f"Item: {classified_display_name(row)}\n"
             f"Rarity: {row['rarity']}\n"
+            f"Minimum Tier: {record_minimum_tier_text(row)}\n"
             f"Source: {source_with_page(row.get('source'), row.get('page'))}\n"
             f"Buyer price: {gp(classified_buyer_price(row))}\n"
             f"Dwarfy commission: {gp(classified_commission(row))} (withheld from seller payout)\n"

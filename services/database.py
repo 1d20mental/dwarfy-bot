@@ -81,6 +81,8 @@ class DwarfyDatabase:
                 item_type TEXT,
                 attunement TEXT,
                 page TEXT,
+                min_apl INTEGER,
+                minimum_tier INTEGER,
                 display_detail TEXT,
                 short_description TEXT,
                 rules_text TEXT,
@@ -183,6 +185,8 @@ class DwarfyDatabase:
                 item_type TEXT,
                 attunement TEXT,
                 page TEXT,
+                min_apl INTEGER,
+                minimum_tier INTEGER,
                 display_detail TEXT,
                 short_description TEXT,
                 rules_text TEXT,
@@ -372,6 +376,8 @@ class DwarfyDatabase:
             "item_type": "ALTER TABLE listings ADD COLUMN item_type TEXT",
             "attunement": "ALTER TABLE listings ADD COLUMN attunement TEXT",
             "page": "ALTER TABLE listings ADD COLUMN page TEXT",
+            "min_apl": "ALTER TABLE listings ADD COLUMN min_apl INTEGER",
+            "minimum_tier": "ALTER TABLE listings ADD COLUMN minimum_tier INTEGER",
             "display_detail": "ALTER TABLE listings ADD COLUMN display_detail TEXT",
             "short_description": "ALTER TABLE listings ADD COLUMN short_description TEXT",
             "rules_text": "ALTER TABLE listings ADD COLUMN rules_text TEXT",
@@ -420,6 +426,8 @@ class DwarfyDatabase:
             "expires_at": "ALTER TABLE classifieds ADD COLUMN expires_at TEXT",
             "returned_at": "ALTER TABLE classifieds ADD COLUMN returned_at TEXT",
             "return_notice_sent_at": "ALTER TABLE classifieds ADD COLUMN return_notice_sent_at TEXT",
+            "min_apl": "ALTER TABLE classifieds ADD COLUMN min_apl INTEGER",
+            "minimum_tier": "ALTER TABLE classifieds ADD COLUMN minimum_tier INTEGER",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
@@ -465,6 +473,8 @@ class DwarfyDatabase:
         item_type: str | None = None,
         attunement: str | None = None,
         page: str | None = None,
+        min_apl: int | None = None,
+        minimum_tier: int | None = None,
         display_detail: str | None = None,
         short_description: str | None = None,
         rules_text: str | None = None,
@@ -502,7 +512,7 @@ class DwarfyDatabase:
                 seller_character_level, sell_roll, seller_payout, cost_basis,
                 item_clean_name, listing_display_name, base_item_name, variant, details,
                 variant_details, variant_type, variant_instructions,
-                item_type, attunement, page, display_detail, short_description,
+                item_type, attunement, page, min_apl, minimum_tier, display_detail, short_description,
                 rules_text, json_notes, item_tags, receipt_text,
                 sale_method, sale_percent, dtp_cost, gold_cost,
                 broker_roll, broker_result, item_status, adventure_log_receipt,
@@ -511,7 +521,7 @@ class DwarfyDatabase:
                 seller_user_display, seller_character, seller_level,
                 status, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
             """,
             (
                 None,
@@ -538,6 +548,8 @@ class DwarfyDatabase:
                 item_type,
                 attunement,
                 page,
+                min_apl,
+                minimum_tier,
                 display_detail,
                 short_description,
                 rules_text,
@@ -1096,6 +1108,8 @@ class DwarfyDatabase:
         item_type: str | None = None,
         attunement: str | None = None,
         page: str | None = None,
+        min_apl: int | None = None,
+        minimum_tier: int | None = None,
         display_detail: str | None = None,
         short_description: str | None = None,
         rules_text: str | None = None,
@@ -1111,12 +1125,12 @@ class DwarfyDatabase:
                 classified_id, item_name, item_clean_name, listing_display_name,
                 base_item_name, variant, details, rarity, source, category, tags,
                 variant_type, variant_instructions, item_type, attunement, page,
-                display_detail, short_description, rules_text, json_notes, item_tags,
+                min_apl, minimum_tier, display_detail, short_description, rules_text, json_notes, item_tags,
                 seller_user_id, seller_display_name, seller_character_name,
                 seller_character_level, asking_price, broker_fee, buyer_total,
                 status, created_at, expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
             """,
             (
                 None,
@@ -1135,6 +1149,8 @@ class DwarfyDatabase:
                 item_type,
                 attunement,
                 page,
+                min_apl,
+                minimum_tier,
                 display_detail,
                 short_description,
                 rules_text,

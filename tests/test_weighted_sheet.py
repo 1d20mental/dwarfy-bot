@@ -495,6 +495,7 @@ class DwarfySaleMechanicTests(unittest.TestCase):
             item_detail="Rare Ring",
             source="DMG 2024",
             page="294",
+            minimum_tier="Tier 2 (Level 5+)",
             base_price=4000,
             dtp_cost=0,
             gold_cost=0,
@@ -504,6 +505,7 @@ class DwarfySaleMechanicTests(unittest.TestCase):
 
         self.assertIn("DTP spent: 0", receipt)
         self.assertIn("Gold spent: 0gp", receipt)
+        self.assertIn("Minimum Tier: Tier 2 (Level 5+)", receipt)
         self.assertNotIn("Broker roll:", receipt)
 
     def test_broker_roll_table(self):
@@ -892,6 +894,7 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
             "source": "DMG 2024",
             "page": "294",
             "cost_basis": 1000,
+            "minimum_tier": 2,
         }
         with patch("services.pricing.random.randint", side_effect=[3, 4, 18]):
             result = roll_buy_price("Rare", 1000)
@@ -909,6 +912,7 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         self.assertIn("Xanathar price roll: 2d10 x 1,000gp = (3 + 4) x 1,000gp = 7000gp", receipt)
         self.assertIn("Dwarfy haggling roll: 18", receipt)
         self.assertIn("Haggling result: Strong haggling, 10% discount", receipt)
+        self.assertIn("Minimum Tier: Tier 2 (Level 5+)", receipt)
         self.assertIn("Final item price: 6,300gp", receipt)
 
     def test_buy_haggling_result_line_highlights_cost_basis_floor(self):
@@ -1054,6 +1058,57 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertIn("DWF-00037", output)
         self.assertIn("Showing all 37 matching listings.", output)
         self.assertNotIn("Showing 10 of 37", output)
+
+    def test_minimum_tier_helpers_map_apl_bands(self):
+        from cogs.dwarfy import minimum_tier_for_min_apl, minimum_tier_text, tier_warning_text
+
+        self.assertEqual(minimum_tier_for_min_apl(None), 1)
+        self.assertEqual(minimum_tier_for_min_apl(4), 1)
+        self.assertEqual(minimum_tier_for_min_apl(5), 2)
+        self.assertEqual(minimum_tier_for_min_apl(11), 3)
+        self.assertEqual(minimum_tier_for_min_apl(17), 4)
+        self.assertEqual(minimum_tier_text(min_apl=5), "Tier 2 (Level 5+)")
+        warning = tier_warning_text(
+            {"minimum_tier": 2},
+            item_name="Spell-Refueling Ring",
+            character="Jimmy Noknees (1)",
+            level=1,
+        )
+        self.assertIn("**Tier Warning:", warning)
+        self.assertIn("Minimum Tier 2 (Level 5+)", warning)
+        self.assertEqual(
+            tier_warning_text({"minimum_tier": 2}, item_name="Ring", character="Rhett (5)", level=5),
+            "",
+        )
+
+    def test_browse_output_and_embed_show_minimum_tier(self):
+        from cogs.dwarfy import build_browse_embed, build_browse_output
+
+        rows = [
+            (
+                {
+                    "listing_id": "DWF-00001",
+                    "listing_display_name": "Spell-Refueling Ring",
+                    "item_name": "Spell-Refueling Ring",
+                    "rarity": "Uncommon",
+                    "source": "EFA",
+                    "seller_user_id": "",
+                    "seller_display_name": "Dwarfy Stock",
+                    "seller_character_name": "Dwarfy Stock",
+                    "seller_character_level": 0,
+                    "stock_source": "owner_stock",
+                    "minimum_tier": 2,
+                },
+                80,
+                600,
+            )
+        ]
+
+        output = build_browse_output(rows)
+        embed = build_browse_embed(rows)
+
+        self.assertIn("Minimum Tier: Tier 2 (Level 5+)", output)
+        self.assertIn("Minimum Tier: Tier 2 (Level 5+)", embed.fields[0].value)
 
     def test_browse_output_caps_extremely_large_results(self):
         from cogs.dwarfy import BROWSE_LISTING_CAP, build_browse_output
@@ -1373,6 +1428,8 @@ class MatchingAndDwarfyTests(unittest.TestCase):
                         base_item_name="+1 Weapon",
                         variant="Longsword",
                         details="Inscribed.",
+                        min_apl=5,
+                        minimum_tier=2,
                         receipt_text="Adventure Log Receipt:\nItem: +1 Weapon (Longsword)",
                     )
                     fetched = await db.get_listing(row["listing_id"])
@@ -1383,6 +1440,8 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         fetched = asyncio.run(run_case())
 
         self.assertEqual(fetched["listing_display_name"], "+1 Weapon (Longsword)")
+        self.assertEqual(fetched["min_apl"], 5)
+        self.assertEqual(fetched["minimum_tier"], 2)
         self.assertIn("Adventure Log Receipt", fetched["receipt_text"])
 
     def test_existing_buy_pricing_still_uses_floor(self):
@@ -1791,6 +1850,7 @@ class ClassifiedsTests(unittest.TestCase):
             "sale_method": "direct",
             "short_description": "A protective ring.",
             "created_at": "2026-06-26T00:00:00+00:00",
+            "minimum_tier": 2,
         }
 
         embed = build_inspect_embed(listing)
@@ -1799,6 +1859,7 @@ class ClassifiedsTests(unittest.TestCase):
         field_names = [field.name for field in embed.fields]
         self.assertIn("Listing", field_names)
         self.assertIn("Price on Buy", field_names)
+        self.assertIn("Minimum Tier", field_names)
         self.assertIn("Sale Method", field_names)
 
 
