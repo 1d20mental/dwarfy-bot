@@ -1227,7 +1227,7 @@ def build_sell_receipt(
         "Adventure Log Receipt:",
         f"Activity: {activity}",
         f"Character: {character.strip()} ({level})",
-        f"Seller: {seller_mention} / {seller_display_name}",
+        f"Seller: {seller_mention}",
         f"Item: {listing_name}",
     ]
     if variant:
@@ -1263,6 +1263,81 @@ def build_sell_receipt(
         lines.append(f"Notes: {details}")
     if variant_instructions and not variant:
         lines.append(f"Variant instructions: {variant_instructions}")
+    return "\n".join(lines)
+
+
+def _public_variant_lines(variant_block: str) -> list[str]:
+    block = variant_block.strip()
+    if not block:
+        return []
+    return ["", "Details:", block]
+
+
+def build_direct_sale_public_output(
+    *,
+    seller: str,
+    seller_character: str,
+    listing_name: str,
+    listing_id: str,
+    sale: Any,
+    minimum_tier: str,
+    base_cost_detail: str,
+    variant_block: str,
+) -> str:
+    """Build the concise public direct-sale receipt."""
+    lines = [
+        "**Dwarfy Direct Sale**",
+        f"{seller} as {seller_character} sold {listing_name} to Dwarfy's Shop.",
+        "",
+        f"Listing: {listing_id}",
+        f"Seller payout / cost basis: {gp(sale.seller_payout)}",
+        f"Base price: {gp(sale.base_price)}",
+        "Rate: 40%",
+        "Cost: 0 DTP, 0gp",
+        f"Minimum Tier: {minimum_tier}",
+        "Status: Final, no takebacks",
+    ]
+    if base_cost_detail:
+        lines.insert(6, f"Base cost resolved: {base_cost_detail}")
+    lines.extend(_public_variant_lines(variant_block))
+    lines.extend(["", "Adventure log: Record this sale manually."])
+    return "\n".join(lines)
+
+
+def build_broker_sale_public_output(
+    *,
+    seller: str,
+    seller_character: str,
+    listing_name: str,
+    listing_id: str | None,
+    broker_roll: Any,
+    minimum_tier: str,
+    base_cost_detail: str,
+    variant_block: str,
+    disaster_message: str | None = None,
+) -> str:
+    """Build the concise public broker receipt."""
+    lost = broker_roll.roll == 1
+    lines = [
+        "**Dwarfy Brokered Sale**",
+        broker_sale_result_line(broker_roll),
+        f"{seller} as {seller_character} brokered {listing_name} through Dwarfy's Shop.",
+        "",
+        f"Listing: {listing_id if listing_id else 'none - item lost'}",
+        f"Seller payout / cost basis: {gp(broker_roll.seller_payout)}",
+        f"Base price: {gp(broker_roll.base_price)}",
+        "Cost: 5 DTP, 25gp",
+        f"Minimum Tier: {minimum_tier}",
+        f"Status: {'Item lost, final, no takebacks' if lost else 'Final, no takebacks'}",
+    ]
+    if base_cost_detail:
+        lines.insert(7, f"Base cost resolved: {base_cost_detail}")
+    if lost:
+        lines.insert(-1, "Inventory: not added to Dwarfy inventory")
+    lines.extend(_public_variant_lines(variant_block))
+    if disaster_message:
+        lines.extend(["", disaster_message])
+    lines.extend(["", "Adventure log: Record this brokerage manually."])
     return "\n".join(lines)
 
 
@@ -2860,27 +2935,15 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             receipt_preview=receipt_preview,
         )
         await self._remember_character(interaction, character, int(level))
-        output = (
-            f"{context['seller']} declares that {context['seller_character']} owns {context['listing_name']} "
-            "and sells it directly to Dwarfy's Shop.\n\n"
-            f"Dwarfy's Shop buys {context['listing_name']} from {context['seller']} as {context['seller_character']} "
-            f"for {gp(sale.seller_payout)} and adds it to magic inventory as {listing['listing_id']}.\n\n"
-            "Sell Magic Item:\n\n"
-            "Method: Direct sale\n"
-            "DTP cost: 0\n"
-            "Gold cost: 0gp\n"
-            "Roll: none\n"
-            f"Result: {sale.result_text}\n"
-            f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
-            f"Base price: {gp(sale.base_price)}\n"
-            f"{('Base cost resolved: ' + context['base_cost_detail'] + chr(10)) if context['base_cost_detail'] else ''}"
-            f"Seller payout: {gp(sale.seller_payout)}\n"
-            f"Dwarfy's cost basis: {gp(sale.seller_payout)}\n"
-            "Future sale price: rolled when purchased; Dwarfy normally keeps his cost-basis floor except on a natural 20 haggling roll\n"
-            f"Sale status: Final, no takebacks{context['variant_block']}\n\n"
-            f"{receipt}\n\n"
-            "Adventure log reminder:\n"
-            "Record this downtime activity manually on the character's adventure log."
+        output = build_direct_sale_public_output(
+            seller=context["seller"],
+            seller_character=context["seller_character"],
+            listing_name=context["listing_name"],
+            listing_id=listing["listing_id"],
+            sale=sale,
+            minimum_tier=sheet_item_minimum_tier_text(sheet_item),
+            base_cost_detail=context["base_cost_detail"],
+            variant_block=context["variant_block"],
         )
         await send_text_response(interaction, output)
 
@@ -2946,26 +3009,16 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 details=context["details_clean"],
                 variant_instructions=sheet_item.variant_instructions,
             )
-            output = (
-                f"{declaration}\n\n"
-                f"{broker_sale_result_line(broker_roll)}\n\n"
-                "Broker Magic Item downtime:\n\n"
-                "Method: Brokered sale\n"
-                "DTP cost: 5\n"
-                "Gold cost: 25gp\n"
-                "Flat d20 roll: 1\n"
-                f"Result: {broker_roll.result_text}\n"
-                f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
-                f"Base price: {gp(broker_roll.base_price)}\n"
-                f"{('Base cost resolved: ' + context['base_cost_detail'] + chr(10)) if context['base_cost_detail'] else ''}"
-                "Seller payout: 0gp\n"
-                "Dwarfy's cost basis: 0gp\n"
-                "Inventory status: Not added to Dwarfy inventory\n"
-                f"Sale status: Final, no takebacks{context['variant_block']}\n\n"
-                f"{random.choice(DISASTER_MESSAGES)}\n\n"
-                f"{receipt}\n\n"
-                "Adventure log reminder:\n"
-                "Record this downtime activity manually on the character's adventure log."
+            output = build_broker_sale_public_output(
+                seller=context["seller"],
+                seller_character=context["seller_character"],
+                listing_name=context["listing_name"],
+                listing_id=None,
+                broker_roll=broker_roll,
+                minimum_tier=sheet_item_minimum_tier_text(sheet_item),
+                base_cost_detail=context["base_cost_detail"],
+                variant_block=context["variant_block"],
+                disaster_message=random.choice(DISASTER_MESSAGES),
             )
             await self._remember_character(interaction, character, int(level))
             await send_text_response(interaction, output)
@@ -3012,28 +3065,15 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             receipt_preview=receipt_preview,
         )
         await self._remember_character(interaction, character, int(level))
-        output = (
-            f"{declaration}\n\n"
-            f"{broker_sale_result_line(broker_roll)}\n\n"
-            f"{context['seller']} as {context['seller_character']} brokers {context['listing_name']} "
-            f"through Dwarfy's Shop for {gp(broker_roll.seller_payout)}.\n"
-            f"Dwarfy's Shop receives {context['listing_name']} and adds it to magic inventory as {listing['listing_id']}.\n\n"
-            "Broker Magic Item downtime:\n\n"
-            "Method: Brokered sale\n"
-            "DTP cost: 5\n"
-            "Gold cost: 25gp\n"
-            f"Flat d20 roll: {broker_roll.roll}\n"
-            f"Result: {broker_roll.result_text}\n"
-            f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}\n"
-            f"Base price: {gp(broker_roll.base_price)}\n"
-            f"{('Base cost resolved: ' + context['base_cost_detail'] + chr(10)) if context['base_cost_detail'] else ''}"
-            f"Seller payout: {gp(broker_roll.seller_payout)}\n"
-            f"Dwarfy's cost basis: {gp(broker_roll.seller_payout)}\n"
-            "Future sale price: rolled when purchased; Dwarfy normally keeps his cost-basis floor except on a natural 20 haggling roll\n"
-            f"Sale status: Final, no takebacks{context['variant_block']}\n\n"
-            f"{receipt}\n\n"
-            "Adventure log reminder:\n"
-            "Record this downtime activity manually on the character's adventure log."
+        output = build_broker_sale_public_output(
+            seller=context["seller"],
+            seller_character=context["seller_character"],
+            listing_name=context["listing_name"],
+            listing_id=listing["listing_id"],
+            broker_roll=broker_roll,
+            minimum_tier=sheet_item_minimum_tier_text(sheet_item),
+            base_cost_detail=context["base_cost_detail"],
+            variant_block=context["variant_block"],
         )
         await send_text_response(interaction, output)
 

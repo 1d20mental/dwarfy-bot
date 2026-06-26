@@ -659,7 +659,30 @@ class DwarfySaleMechanicTests(unittest.TestCase):
         self.assertIn("DTP spent: 0", receipt)
         self.assertIn("Gold spent: 0gp", receipt)
         self.assertIn("Minimum Tier: Tier 2 (Level 5+)", receipt)
+        self.assertEqual(receipt.count("Player"), 1)
         self.assertNotIn("Broker roll:", receipt)
+
+    def test_direct_sell_public_output_is_concise(self):
+        from cogs.dwarfy import build_direct_sale_public_output
+
+        output = build_direct_sale_public_output(
+            seller="@Player",
+            seller_character="Baehotin (13)",
+            listing_name="Ring of Protection",
+            listing_id="DWF-00001",
+            sale=direct_sell_price(4000),
+            minimum_tier="Tier 2 (Level 5+)",
+            base_cost_detail="",
+            variant_block="",
+        )
+
+        self.assertIn("**Dwarfy Direct Sale**", output)
+        self.assertIn("@Player as Baehotin (13) sold Ring of Protection", output)
+        self.assertIn("Seller payout / cost basis: 1,600gp", output)
+        self.assertIn("Adventure log: Record this sale manually.", output)
+        self.assertNotIn("Adventure Log Receipt:", output)
+        self.assertNotIn("Future sale price", output)
+        self.assertLessEqual(len(output.splitlines()), 12)
 
     def test_broker_roll_table(self):
         cases = [
@@ -690,6 +713,31 @@ class DwarfySaleMechanicTests(unittest.TestCase):
             result,
             "🎲 Broker roll: 18 - Strong buyer, 60% of base price - payout 2,400gp.",
         )
+
+    def test_broker_public_output_is_concise(self):
+        from cogs.dwarfy import build_broker_sale_public_output
+
+        with patch("services.pricing.random.randint", return_value=18):
+            broker_roll = roll_broker_price(4000)
+
+        output = build_broker_sale_public_output(
+            seller="@Player",
+            seller_character="Baehotin (13)",
+            listing_name="Ring of Protection",
+            listing_id="DWF-00001",
+            broker_roll=broker_roll,
+            minimum_tier="Tier 2 (Level 5+)",
+            base_cost_detail="",
+            variant_block="",
+        )
+
+        self.assertIn("**Dwarfy Brokered Sale**", output)
+        self.assertIn("Broker roll: 18", output)
+        self.assertIn("Seller payout / cost basis: 2,400gp", output)
+        self.assertIn("Adventure log: Record this brokerage manually.", output)
+        self.assertNotIn("Adventure Log Receipt:", output)
+        self.assertNotIn("Future sale price", output)
+        self.assertLessEqual(len(output.splitlines()), 12)
 
     def test_base_price_is_used_for_direct_and_broker_pricing(self):
         row = item(name="Rare Rolled Low", rarity="Rare", roll_rarity="Uncommon", base_price=2500)
