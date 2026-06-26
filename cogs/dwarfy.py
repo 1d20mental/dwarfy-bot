@@ -50,6 +50,17 @@ BROWSE_RARITY_CHOICES = [
     app_commands.Choice(name="Legendary", value="Legendary"),
 ]
 BROWSE_RARITY_VALUES = {choice.value for choice in BROWSE_RARITY_CHOICES}
+HELP_TOPIC_CHOICES = [
+    app_commands.Choice(name="Overview", value="overview"),
+    app_commands.Choice(name="Session Loot", value="sessionloot"),
+    app_commands.Choice(name="Shop Browse / Inspect / Buy", value="shop"),
+    app_commands.Choice(name="Sell / Broker", value="sell"),
+    app_commands.Choice(name="Classifieds", value="classifieds"),
+    app_commands.Choice(name="Owner Stock", value="owner"),
+    app_commands.Choice(name="Admin Tools", value="admin"),
+    app_commands.Choice(name="Channels & Privacy", value="channels"),
+]
+HELP_TOPIC_VALUES = {choice.value for choice in HELP_TOPIC_CHOICES}
 BROWSE_LISTING_CAP = 100
 BROWSE_PAGE_SIZE = 10
 DEFAULT_RANDOM_PERMANENT_COUNT = 10
@@ -1001,6 +1012,276 @@ def build_classified_trade_log(
     )
 
 
+def _help_field(embed: discord.Embed, name: str, lines: list[str]) -> None:
+    """Add a help field without risking Discord's field length limit."""
+    value = "\n".join(lines)
+    embed.add_field(name=name, value=truncate_text(value, 1024), inline=False)
+
+
+def build_help_embed(topic: str | None = None) -> discord.Embed:
+    """Build the private `/dwarfy help` guide."""
+    selected = (topic or "overview").casefold().strip()
+    if selected not in HELP_TOPIC_VALUES:
+        selected = "overview"
+
+    embed = discord.Embed(color=discord.Color(0xC9A227))
+    embed.set_footer(text="Dwarfy never checks character sheets. Players still update gold, DTP, and logs manually.")
+
+    if selected == "sessionloot":
+        embed.title = "Dwarfy Help - Session Loot"
+        embed.description = "`/sessionloot` rolls a complete public loot package from the Google Sheet."
+        _help_field(
+            embed,
+            "Command",
+            [
+                "`/sessionloot players:<1-20> apl:<1-20>`",
+                "Optional: `tag` and `creature_type`.",
+                "If the session loot channel is configured, use it there.",
+            ],
+        )
+        _help_field(
+            embed,
+            "What It Rolls",
+            [
+                "Loot priority rolls for generic Player 1, Player 2, etc.",
+                "Permanent slots: `players // 2`.",
+                "Consumable slots: remaining players.",
+                "Rarity comes from the DMG tier d100 table.",
+                "Final item selection uses the sheet's `Weight` column.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Sheet Rules",
+            [
+                "`Roll Rarity` controls session loot rarity.",
+                "`Rarity` controls Dwarfy pricing.",
+                "`Allowed=FALSE` and `Session Eligible=FALSE` block session loot.",
+                "If a rolled rarity has no pool, the bot fills from the nearest valid fallback rarity.",
+            ],
+        )
+        return embed
+
+    if selected == "shop":
+        embed.title = "Dwarfy Help - Shop Browsing & Buying"
+        embed.description = "Use these in the Dwarfy shop channel."
+        _help_field(
+            embed,
+            "Browse And Inspect",
+            [
+                "`/dwarfy browse` shows available Dwarfy inventory privately.",
+                "Use `rarity`, `max_price`, or `search` to narrow it.",
+                "`/dwarfy inspect listing:DWF-00001` shows a private item card.",
+                "Inspect buttons can show rules, show receipt, or start buying.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Buy",
+            [
+                "`/dwarfy buy listing:DWF-00001 character:<name> level:<1-20> gold:<amount>`",
+                "Buying uses the item listing ID only.",
+                "Dwarfy rolls a Xanathar-style price, then a d20 haggling discount.",
+                "The final price never drops below Dwarfy's cost basis.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Debt Warning",
+            [
+                "If declared gold is too low, the sale still completes.",
+                "The character owes the shortfall plus a 5,000gp fine.",
+                "That character is jailed/unplayable until resolved by staff.",
+            ],
+        )
+        return embed
+
+    if selected == "sell":
+        embed.title = "Dwarfy Help - Selling To Dwarfy"
+        embed.description = "Use these in the Dwarfy sell channel. Permanent magic items only."
+        _help_field(
+            embed,
+            "Direct Sale",
+            [
+                "`/dwarfy sell character:<name> level:<1-20> item:<item>`",
+                "No DTP cost.",
+                "No gold cost.",
+                "No roll.",
+                "Pays 40% of the base price and creates a Dwarfy inventory listing.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Brokered Sale",
+            [
+                "`/dwarfy broker character:<name> level:<1-20> item:<item>`",
+                "Costs 5 DTP and 25gp manually.",
+                "Rolls 1d20 for payout.",
+                "Can pay more than direct sale.",
+                "Natural 1 loses the item and creates no buyable inventory.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Generic Items",
+            [
+                "Use `variant` for templates like `+1 Weapon` or `Adamantine Armor`.",
+                "Example: `item:+1 Weapon variant:Longsword`.",
+                "Use `details` only for custom notes, not full rules text.",
+            ],
+        )
+        return embed
+
+    if selected == "classifieds":
+        embed.title = "Dwarfy Help - Classifieds"
+        embed.description = "Player-to-player magic item postings. Dwarfy takes a buyer-paid fee."
+        _help_field(
+            embed,
+            "Post A Classified",
+            [
+                "`/dwarfy classified_post character:<name> level:<1-20> item:<item> price:<gp>`",
+                "The seller receives the listed price.",
+                f"Dwarfy adds a {CLASSIFIED_FEE_PERCENT}% broker fee paid by the buyer.",
+                "The item does not enter Dwarfy inventory.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Browse And Buy",
+            [
+                "`/dwarfy classified_browse` privately shows open postings.",
+                "`/dwarfy classified_inspect classified:DWC-00001` shows one posting.",
+                "`/dwarfy classified_buy classified:DWC-00001 character:<name> level:<1-20>`",
+                "The buy command posts copyable trade-log text for both players.",
+            ],
+        )
+        _help_field(
+            embed,
+            "IDs",
+            [
+                "Dwarfy inventory listings use `DWF-00001`.",
+                "Classified postings use `DWC-00001`.",
+            ],
+        )
+        return embed
+
+    if selected == "owner":
+        embed.title = "Dwarfy Help - Owner Stock"
+        embed.description = "Owner-only tools for manually stocking Dwarfy's inventory."
+        _help_field(
+            embed,
+            "Stock Commands",
+            [
+                "`/dwarfy stock_add` adds a specific sheet item.",
+                "`/dwarfy stock_random` creates a weighted random batch.",
+                "`/dwarfy stock_clear confirm:True` voids current owner stock only.",
+                "`/dwarfy stock_gold` records shop gold in the ledger.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Random Stock",
+            [
+                "Defaults to 10 permanent and 15 consumable items.",
+                "Uses sheet weights and an owner-stock rarity table.",
+                "Generic items get variants when possible.",
+                "Ammunition stocks as 20 arrows, 20 bolts, or 10 bullets.",
+            ],
+        )
+        return embed
+
+    if selected == "admin":
+        embed.title = "Dwarfy Help - Admin Tools"
+        embed.description = "These require one of the configured admin/mod role names."
+        _help_field(
+            embed,
+            "Audit And Maintenance",
+            [
+                "`/dwarfy reload` refreshes the Google Sheet cache.",
+                "`/dwarfy stats` shows the shop dashboard.",
+                "`/dwarfy history` shows recent ledger entries.",
+                "`/dwarfy export` sends CSV exports for listings, ledger, and classifieds.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Corrections",
+            [
+                "`/dwarfy void listing:DWF-00001 reason:<why>` voids a shop listing.",
+                "`/dwarfy classified_void classified:DWC-00001 reason:<why>` voids a classified.",
+                "`/dwarfy debt_resolve listing:DWF-00001 reason:<how>` marks debt resolved.",
+                "`/dwarfy restock_status` checks owner-stock freshness.",
+            ],
+        )
+        return embed
+
+    if selected == "channels":
+        embed.title = "Dwarfy Help - Channels & Privacy"
+        embed.description = "Dwarfy uses channel restrictions so audit trails stay readable."
+        _help_field(
+            embed,
+            "Channel Rules",
+            [
+                "`/dwarfy sell` and `/dwarfy broker` use the configured sell channel.",
+                "Shop commands use the configured shop channel.",
+                "`/sessionloot` uses the session loot channel only if one is configured.",
+                "Wrong-channel errors are private.",
+            ],
+        )
+        _help_field(
+            embed,
+            "Privacy",
+            [
+                "Browse, inspect, help, stats, history, export, and reload are private.",
+                "Completed sales, buys, broker results, classifieds, and session loot are public.",
+                "Public outputs are plain text where audit/search matters.",
+            ],
+        )
+        return embed
+
+    embed.title = "Dwarfy Bot Help"
+    embed.description = "A slash-command-only D&D shop and session loot bot."
+    _help_field(
+        embed,
+        "Start Here",
+        [
+            "`/dwarfy ping` checks whether the shop is open.",
+            "`/dwarfy help topic:<topic>` shows a focused guide.",
+            "`/sessionloot players:<count> apl:<level>` rolls public session loot.",
+        ],
+    )
+    _help_field(
+        embed,
+        "Player Shop Commands",
+        [
+            "`/dwarfy browse` - privately browse Dwarfy inventory.",
+            "`/dwarfy inspect` - view item details and buttons.",
+            "`/dwarfy buy` - buy by `DWF-` listing ID.",
+            "`/dwarfy sell` - direct 40% sale to Dwarfy.",
+            "`/dwarfy broker` - rolled downtime sale to Dwarfy.",
+        ],
+    )
+    _help_field(
+        embed,
+        "Player Classifieds",
+        [
+            "`/dwarfy classified_post` - post a player-to-player sale.",
+            "`/dwarfy classified_browse` - privately browse postings.",
+            "`/dwarfy classified_buy` - buy by `DWC-` classified ID and get trade-log text.",
+        ],
+    )
+    _help_field(
+        embed,
+        "Admin / Owner",
+        [
+            "Admins: `reload`, `stats`, `history`, `export`, `void`, `debt_resolve`.",
+            "Owner: `stock_add`, `stock_random`, `stock_clear`, `stock_gold`.",
+            "Use topic choices for details.",
+        ],
+    )
+    return embed
+
+
 class Dwarfy(commands.GroupCog, name="dwarfy"):
     """Commands under the /dwarfy group."""
 
@@ -1075,6 +1356,15 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     @app_commands.command(name="ping", description="Check whether Dwarfy's Shop is open.")
     async def ping(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Dwarfy's Shop is open.")
+
+    @app_commands.command(name="help", description="Show a private guide to Dwarfy Bot commands.")
+    @app_commands.describe(topic="Optional help topic.")
+    @app_commands.choices(topic=HELP_TOPIC_CHOICES)
+    async def help(self, interaction: discord.Interaction, topic: str | None = None) -> None:
+        await interaction.response.send_message(
+            embed=build_help_embed(topic),
+            ephemeral=True,
+        )
 
     async def _resolve_sale_context(
         self,

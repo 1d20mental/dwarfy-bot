@@ -376,6 +376,7 @@ After that, test the shop flow:
 ### Player Commands
 
 - `/dwarfy ping`
+- `/dwarfy help`
 - `/dwarfy sell`
 - `/dwarfy broker`
 - `/dwarfy browse`

@@ -1654,3 +1654,40 @@ class ClassifiedsTests(unittest.TestCase):
         self.assertIn("Listing", field_names)
         self.assertIn("Price on Buy", field_names)
         self.assertIn("Sale Method", field_names)
+
+
+class HelpCommandTests(unittest.TestCase):
+    def test_help_overview_mentions_core_player_flows(self):
+        from cogs.dwarfy import build_help_embed
+
+        embed = build_help_embed()
+        text = "\n".join([embed.title or "", embed.description or ""] + [field.value for field in embed.fields])
+
+        self.assertIn("/sessionloot", text)
+        self.assertIn("/dwarfy browse", text)
+        self.assertIn("/dwarfy sell", text)
+        self.assertIn("/dwarfy classified_post", text)
+
+    def test_all_help_topics_build_clean_embeds(self):
+        from cogs.dwarfy import HELP_TOPIC_CHOICES, build_help_embed
+
+        for choice in HELP_TOPIC_CHOICES:
+            with self.subTest(topic=choice.value):
+                embed = build_help_embed(choice.value)
+
+            self.assertTrue(embed.title)
+            self.assertGreaterEqual(len(embed.fields), 1)
+
+    def test_invalid_help_topic_falls_back_to_overview(self):
+        from cogs.dwarfy import build_help_embed
+
+        self.assertEqual(build_help_embed("bogus").title, "Dwarfy Bot Help")
+
+    def test_help_channel_topic_explains_privacy(self):
+        from cogs.dwarfy import build_help_embed
+
+        embed = build_help_embed("channels")
+        text = "\n".join(field.value for field in embed.fields)
+
+        self.assertIn("Wrong-channel errors are private", text)
+        self.assertIn("Completed sales", text)
