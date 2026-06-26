@@ -17,7 +17,6 @@ from discord.ext import commands, tasks
 from services.pricing import (
     buy_price_formula,
     direct_sell_price,
-    is_supported_rarity,
     possible_final_price_range,
     roll_broker_price,
     roll_buy_price,
@@ -338,6 +337,14 @@ def sheet_item_minimum_tier_text(sheet_item: Any) -> str:
     return minimum_tier_text(min_apl=sheet_item.min_apl)
 
 
+def record_base_price(record: dict[str, Any]) -> int | None:
+    """Return the stored Dwarfy Base Price for a listing when present."""
+    value = record.get("base_price")
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
 def tier_warning_text(record: dict[str, Any], *, item_name: str, character: str, level: int) -> str:
     """Warn when a buyer's level is below the item's minimum server tier."""
     required_tier = record_minimum_tier(record)
@@ -350,12 +357,14 @@ def tier_warning_text(record: dict[str, Any], *, item_name: str, character: str,
 
 
 def enrich_record_tier_from_cache(record: dict[str, Any], cache: Any) -> dict[str, Any]:
-    """Fill missing tier fields from the live sheet cache when possible.
+    """Fill missing tier/base-price fields from the live sheet cache when possible.
 
     This lets older listings created before tier storage still display useful
-    minimum-tier guidance.
+    minimum-tier guidance and use the current sheet Base Price.
     """
-    if record.get("minimum_tier") not in (None, ""):
+    needs_tier = record.get("minimum_tier") in (None, "")
+    needs_base_price = record.get("base_price") in (None, "")
+    if not needs_tier and not needs_base_price:
         return record
     if not getattr(cache, "loaded", False):
         return record
@@ -372,8 +381,11 @@ def enrich_record_tier_from_cache(record: dict[str, Any], cache: Any) -> dict[st
         if match.item is None:
             continue
         enriched = dict(record)
-        enriched["min_apl"] = match.item.min_apl
-        enriched["minimum_tier"] = minimum_tier_for_min_apl(match.item.min_apl)
+        if needs_tier:
+            enriched["min_apl"] = match.item.min_apl
+            enriched["minimum_tier"] = minimum_tier_for_min_apl(match.item.min_apl)
+        if needs_base_price:
+            enriched["base_price"] = match.item.base_price
         return enriched
     return record
 
@@ -746,7 +758,11 @@ def listing_receipt_text(listing: dict[str, Any]) -> str:
 def build_inspect_embed(listing: dict[str, Any]) -> discord.Embed:
     """Build the polished private listing inspect card."""
     display_name = listing_display_name(listing)
-    low, high = possible_final_price_range(listing["rarity"], int(listing["cost_basis"]))
+    base_price = record_base_price(listing)
+    price_on_buy = "Base Price missing"
+    if base_price is not None:
+        low, high = possible_final_price_range(base_price, int(listing["cost_basis"]))
+        price_on_buy = price_range_text(low, high)
     status = listing.get("status") or "unknown"
     item_status = listing.get("item_status") or ("inventory" if status == "available" else status)
     embed = discord.Embed(
@@ -756,7 +772,8 @@ def build_inspect_embed(listing: dict[str, Any]) -> discord.Embed:
     )
     embed.add_field(name="Listing", value=listing["listing_id"], inline=True)
     embed.add_field(name="Rarity", value=listing.get("rarity") or "Unknown", inline=True)
-    embed.add_field(name="Price on Buy", value=price_range_text(low, high), inline=True)
+    embed.add_field(name="Price on Buy", value=price_on_buy, inline=True)
+    embed.add_field(name="Base Price", value=gp(base_price) if base_price is not None else "missing", inline=True)
     embed.add_field(name="Minimum Tier", value=record_minimum_tier_text(listing), inline=True)
     embed.add_field(name="Source", value=source_with_page(listing.get("source"), listing.get("page")), inline=True)
     embed.add_field(name="Origin", value=truncate_text(listing_origin_text(listing), 1024), inline=False)
@@ -908,7 +925,7 @@ def stock_item_pool(
                 consumable=consumable,
                 apl=apl,
             )
-            if item.loot_type == "Item" and is_supported_rarity(item.rarity)
+            if item.loot_type == "Item" and item.base_price is not None
         ]
         if tag_norm:
             tagged = [item for item in pool if tag_norm in item.tags]
@@ -1043,8 +1060,7 @@ def build_buy_receipt(
         f"Source: {source_with_page(listing.get('source'), listing.get('page'))}",
         f"Original source: {origin_text}",
         "",
-        f"Xanathar price roll: {buy_roll.roll_detail}",
-        f"Base asking price: {gp(buy_roll.rolled_price)}",
+        f"Dwarfy base price: {gp(buy_roll.rolled_price)}",
         f"Dwarfy haggling roll: {buy_roll.haggling_roll}",
         f"Haggling result: {buy_roll.haggling_result}",
         f"Discount: {discount_text(buy_roll.discount_percent)}",
@@ -1082,10 +1098,10 @@ def sell_validation_error(sheet_item) -> str | None:
         return f"`{sheet_item.name}` is marked Consumable=TRUE. Dwarfy only buys permanent magic items."
     if sheet_item.dwarfy_sell_eligible is False:
         return f"`{sheet_item.name}` is marked Dwarfy Sell Eligible=FALSE and cannot be sold to Dwarfy."
-    if not is_supported_rarity(sheet_item.rarity):
+    if sheet_item.base_price is None:
         return (
-            f"Dwarfy cannot price `{sheet_item.rarity}` items in version 1. "
-            "Supported rarities: Common, Uncommon, Rare, Very Rare, Legendary."
+            f"`{sheet_item.name}` does not have a Base Price in the sheet. "
+            "It cannot be sold directly or brokered through Dwarfy, but it can still be posted in classifieds."
         )
     return None
 
@@ -1337,7 +1353,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             "Sheet Rules",
             [
                 "`Roll Rarity` controls session loot rarity.",
-                "`Rarity` controls Dwarfy pricing.",
+                "`Base Price` controls Dwarfy pricing.",
                 "`Allowed=FALSE` and `Session Eligible=FALSE` block session loot.",
                 "If a rolled rarity has no pool, the bot fills from the nearest valid fallback rarity.",
             ],
@@ -1395,7 +1411,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             [
                 "`/dwarfy buy listing:DWF-00001 character:<name> level:<1-20> gold:<amount>`",
                 "Buying uses the item listing ID only.",
-                "Dwarfy rolls a Xanathar-style price, then a d20 haggling discount.",
+                "Dwarfy uses the sheet Base Price, then rolls a d20 haggling discount.",
                 "Dwarfy normally keeps his cost-basis floor, but a natural 20 can break it.",
                 "If your level is below the item's minimum tier, the receipt shows a bold server-rule warning.",
             ],
@@ -2058,6 +2074,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             page=sheet_item.page or None,
             min_apl=sheet_item.min_apl,
             minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
+            base_price=sheet_item.base_price,
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
             rules_text=sheet_item.rules_text or None,
@@ -2097,7 +2114,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         for sheet_item in self.bot.sheet_cache.items:
             if not sheet_item.allowed or sheet_item.loot_type != "Item":
                 continue
-            if not is_supported_rarity(sheet_item.rarity):
+            if sheet_item.base_price is None:
                 continue
             key = sheet_item.name.casefold().strip()
             if key in seen:
@@ -2176,9 +2193,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return None
-        if not is_supported_rarity(sheet_item.rarity):
+        if sheet_item.base_price is None:
             await interaction.response.send_message(
-                f"Dwarfy cannot price `{sheet_item.rarity}` items in version 1.",
+                f"`{sheet_item.name}` does not have a Base Price in the sheet and cannot be stocked for Dwarfy sales.",
                 ephemeral=True,
             )
             return None
@@ -2254,13 +2271,6 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return None
-        if not is_supported_rarity(sheet_item.rarity):
-            await interaction.response.send_message(
-                f"Dwarfy cannot classify `{sheet_item.rarity}` items in version 1.",
-                ephemeral=True,
-            )
-            return None
-
         variant_clean = (variant or "").strip() or None
         details_clean = (details or "").strip() or None
         is_template = is_generic_template_item(sheet_item)
@@ -2329,6 +2339,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             page=sheet_item.page or None,
             min_apl=sheet_item.min_apl,
             minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
+            base_price=sheet_item.base_price,
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
             rules_text=sheet_item.rules_text or None,
@@ -2389,7 +2400,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         sheet_item = context["sheet_item"]
-        default_cost_basis = direct_sell_price(sheet_item.rarity).seller_payout
+        default_cost_basis = direct_sell_price(sheet_item.base_price).seller_payout
         final_cost_basis = default_cost_basis if cost_basis is None else int(cost_basis)
         batch_id = new_stock_batch_id()
         rows: list[dict[str, Any]] = []
@@ -2597,7 +2608,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             sheet_item = selection.item
             if not consumable:
                 selected_permanent_names.add(sheet_item.name.casefold())
-            cost_basis = direct_sell_price(sheet_item.rarity).seller_payout
+            cost_basis = direct_sell_price(sheet_item.base_price).seller_payout
             listing_name, variant, variant_note = resolve_random_stock_identity(sheet_item)
             stock_note = f"Random owner stock batch {batch_id}."
             if variant_note:
@@ -2699,7 +2710,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         sheet_item = context["sheet_item"]
-        sale = direct_sell_price(sheet_item.rarity)
+        sale = direct_sell_price(sheet_item.base_price)
         receipt_preview = build_sell_receipt(
             activity="Sell Magic Item directly to Dwarfy's Shop",
             character=character,
@@ -2790,7 +2801,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             return
 
         sheet_item = context["sheet_item"]
-        broker_roll = roll_broker_price(sheet_item.rarity)
+        broker_roll = roll_broker_price(sheet_item.base_price)
         declaration = (
             f"{context['seller']} declares that {context['seller_character']} owns {context['listing_name']} "
             "and spends 5 DTP and 25gp to broker it through Dwarfy's Shop."
@@ -3016,8 +3027,11 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             ).casefold()
             if search_filter and search_filter not in searchable:
                 continue
+            base_price = record_base_price(listing)
+            if base_price is None:
+                continue
             low, high = possible_final_price_range(
-                listing["rarity"],
+                base_price,
                 int(listing["cost_basis"]),
             )
             if max_price is not None and high > max_price:
@@ -3073,10 +3087,16 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             listing.get("seller_character_name") or listing.get("seller_character"),
             listing.get("seller_character_level") or listing.get("seller_level"),
         )
-        low, high = possible_final_price_range(
-            listing["rarity"],
-            int(listing["cost_basis"]),
-        )
+        base_price = record_base_price(listing)
+        price_range = "Base Price missing"
+        price_formula = "Base Price missing"
+        if base_price is not None:
+            low, high = possible_final_price_range(
+                base_price,
+                int(listing["cost_basis"]),
+            )
+            price_range = price_range_text(low, high)
+            price_formula = buy_price_formula(base_price)
 
         lines = [
             f"Listing: {listing['listing_id']}",
@@ -3102,12 +3122,13 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 f"Short description: {listing.get('short_description') or 'none'}",
                 f"Sale method: {listing.get('sale_method') or 'unknown/legacy'}",
                 f"Original source: {listing_origin_text(listing)}",
+                f"Base price: {gp(base_price) if base_price is not None else 'missing'}",
                 f"Seller payout: {gp(int(listing.get('seller_payout') or 0))}",
                 f"Dwarfy cost basis: {gp(int(listing['cost_basis']))}",
                 f"DTP cost: {listing.get('dtp_cost') if listing.get('dtp_cost') is not None else 'unknown'}",
                 f"Gold cost: {gp(int(listing.get('gold_cost') or 0)) if listing.get('gold_cost') is not None else 'unknown'}",
-                f"Buying price formula: {buy_price_formula(listing['rarity'])}",
-                f"Possible final price: {price_range_text(low, high)}",
+                f"Buying price formula: {price_formula}",
+                f"Possible final price: {price_range}",
                 f"Item status: {listing.get('item_status') or ('inventory' if listing['status'] == 'available' else listing['status'])}",
                 f"Status: {listing['status']}",
             ]
@@ -3247,6 +3268,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
         row = enrich_record_tier_from_cache(row, self.bot.sheet_cache)
+        if record_base_price(row) is None:
+            await interaction.response.send_message(
+                f"`{row['listing_id']}` is missing a Base Price and cannot be bought until the sheet/listing is corrected.",
+                ephemeral=True,
+            )
+            return
         await self._finish_buy(interaction, row=row, character=character, level=level, gold=gold)
 
     async def _finish_buy(
@@ -3259,7 +3286,14 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         gold: int,
     ) -> None:
         """Finalize a Dwarfy-owned inventory purchase."""
-        buy_roll = roll_buy_price(row["rarity"], int(row["cost_basis"]))
+        base_price = record_base_price(row)
+        if base_price is None:
+            await interaction.response.send_message(
+                f"`{row['listing_id']}` is missing a Base Price and cannot be bought until the sheet/listing is corrected.",
+                ephemeral=True,
+            )
+            return
+        buy_roll = roll_buy_price(base_price, int(row["cost_basis"]))
         item_name = listing_display_name(row)
         gold_available = int(gold)
         cost_basis = int(row["cost_basis"])

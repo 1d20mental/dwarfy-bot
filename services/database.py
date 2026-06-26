@@ -83,6 +83,7 @@ class DwarfyDatabase:
                 page TEXT,
                 min_apl INTEGER,
                 minimum_tier INTEGER,
+                base_price INTEGER,
                 display_detail TEXT,
                 short_description TEXT,
                 rules_text TEXT,
@@ -378,6 +379,7 @@ class DwarfyDatabase:
             "page": "ALTER TABLE listings ADD COLUMN page TEXT",
             "min_apl": "ALTER TABLE listings ADD COLUMN min_apl INTEGER",
             "minimum_tier": "ALTER TABLE listings ADD COLUMN minimum_tier INTEGER",
+            "base_price": "ALTER TABLE listings ADD COLUMN base_price INTEGER",
             "display_detail": "ALTER TABLE listings ADD COLUMN display_detail TEXT",
             "short_description": "ALTER TABLE listings ADD COLUMN short_description TEXT",
             "rules_text": "ALTER TABLE listings ADD COLUMN rules_text TEXT",
@@ -475,6 +477,7 @@ class DwarfyDatabase:
         page: str | None = None,
         min_apl: int | None = None,
         minimum_tier: int | None = None,
+        base_price: int | None = None,
         display_detail: str | None = None,
         short_description: str | None = None,
         rules_text: str | None = None,
@@ -512,7 +515,7 @@ class DwarfyDatabase:
                 seller_character_level, sell_roll, seller_payout, cost_basis,
                 item_clean_name, listing_display_name, base_item_name, variant, details,
                 variant_details, variant_type, variant_instructions,
-                item_type, attunement, page, min_apl, minimum_tier, display_detail, short_description,
+                item_type, attunement, page, min_apl, minimum_tier, base_price, display_detail, short_description,
                 rules_text, json_notes, item_tags, receipt_text,
                 sale_method, sale_percent, dtp_cost, gold_cost,
                 broker_roll, broker_result, item_status, adventure_log_receipt,
@@ -521,7 +524,7 @@ class DwarfyDatabase:
                 seller_user_display, seller_character, seller_level,
                 status, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?)
             """,
             (
                 None,
@@ -550,6 +553,7 @@ class DwarfyDatabase:
                 page,
                 min_apl,
                 minimum_tier,
+                base_price,
                 display_detail,
                 short_description,
                 rules_text,

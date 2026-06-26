@@ -29,6 +29,7 @@ RARITY_NAMES = {
 SUPPORTED_LOOT_TYPES = {"Item", "Monster Component"}
 TRUE_TEXT = {"true", "yes", "y", "1"}
 FALSE_TEXT = {"false", "no", "n", "0"}
+BASE_PRICE_COLUMNS = ("Base Price", "Item Base Price", "Dwarfy Base Price")
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class SheetItem:
     min_apl: int | None
     max_apl: int | None
     notes: str
+    base_price: int | None = None
     roll_rarity: str = ""
     weight: int = 1
     session_eligible: bool = False
@@ -146,6 +148,32 @@ def parse_optional_int(value: object) -> int | None:
     if not text:
         return None
     return int(float(text))
+
+
+def parse_base_price(value: object, *, row_number: int, warnings: list[str]) -> int | None:
+    """Parse the sheet Base Price column used by Dwarfy's shop economy."""
+    text = _clean(value)
+    if not text:
+        return None
+
+    normalized = (
+        text.casefold()
+        .replace(",", "")
+        .replace("gp", "")
+        .replace("gold", "")
+        .strip()
+    )
+    try:
+        number = Decimal(normalized)
+    except InvalidOperation:
+        warnings.append(f"Bot Items row {row_number} has invalid Base Price {text!r}; Dwarfy pricing disabled.")
+        return None
+
+    if number != number.to_integral_value() or number < 1:
+        warnings.append(f"Bot Items row {row_number} has invalid Base Price {text!r}; Dwarfy pricing disabled.")
+        return None
+
+    return int(number)
 
 
 def parse_weight(value: object, *, row_number: int, warnings: list[str]) -> int:
@@ -259,6 +287,13 @@ def _cell(row: list[str], headers: dict[str, int], column: str) -> str:
     return _clean(row[index])
 
 
+def _first_header(headers: dict[str, int], columns: tuple[str, ...]) -> str | None:
+    for column in columns:
+        if _has_header(headers, column):
+            return column
+    return None
+
+
 def _score_match(query: str, candidate: str) -> float:
     query_norm = query.casefold().strip()
     candidate_norm = candidate.casefold().strip()
@@ -287,6 +322,7 @@ def _sell_match_key(item: SheetItem) -> tuple[object, ...]:
         item.consumable,
         item.allowed,
         item.dwarfy_sell_eligible,
+        item.base_price,
         item.item_type,
         item.attunement,
         item.page,
@@ -511,6 +547,11 @@ class SheetCache:
         has_weight = _has_header(headers, "Weight")
         has_session_eligible = _has_header(headers, "Session Eligible")
         has_dwarfy_sell_eligible = _has_header(headers, "Dwarfy Sell Eligible")
+        base_price_column = _first_header(headers, BASE_PRICE_COLUMNS)
+        if base_price_column is None:
+            self.warnings.append(
+                f"{self.bot_items_tab} is missing Base Price. Dwarfy sell, broker, and owner stock will not suggest items."
+            )
 
         items: list[SheetItem] = []
         for row_number, row in enumerate(values[1:], start=2):
@@ -550,6 +591,11 @@ class SheetCache:
                 if has_weight
                 else 1
             )
+            base_price = (
+                parse_base_price(_cell(row, headers, base_price_column), row_number=row_number, warnings=self.warnings)
+                if base_price_column
+                else None
+            )
             session_eligible = parse_session_eligible(
                 _cell(row, headers, "Session Eligible"),
                 row_number=row_number,
@@ -584,6 +630,7 @@ class SheetCache:
                     max_apl=max_apl,
                     session_eligible=session_eligible,
                     dwarfy_sell_eligible=dwarfy_sell_eligible,
+                    base_price=base_price,
                     variant_type=_cell(row, headers, "Variant Type"),
                     variant_instructions=_cell(row, headers, "Variant Instructions"),
                     page=_cell(row, headers, "Page"),
@@ -635,6 +682,8 @@ class SheetCache:
 
     def _sell_preference_score(self, item: SheetItem) -> int:
         score = 0
+        if item.base_price is not None:
+            score += 8
         if item.allowed:
             score += 4
         if not item.consumable:
@@ -686,8 +735,11 @@ class SheetCache:
 
         best_by_name: dict[str, tuple[float, SheetItem]] = {}
         for item in self.items:
-            if for_sell and item.consumable:
-                continue
+            if for_sell:
+                if item.consumable:
+                    continue
+                if item.base_price is None:
+                    continue
             score = _score_match(query, item.name)
             if score < 0.58:
                 continue
@@ -723,6 +775,8 @@ class SheetCache:
 
         for item in self.items:
             if not item.allowed or item.consumable or item.dwarfy_sell_eligible is False:
+                continue
+            if item.base_price is None:
                 continue
             key = item.name.casefold().strip()
             if key in seen:

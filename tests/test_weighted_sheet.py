@@ -16,7 +16,6 @@ from services.loot import (
     select_loot_item,
 )
 from services.pricing import (
-    base_price_for_rarity,
     direct_sell_price,
     possible_final_price_range,
     roll_broker_price,
@@ -81,6 +80,7 @@ def item(
     rules_text="",
     item_tags="",
     variant_options="",
+    base_price=400,
 ):
     return SheetItem(
         name=name,
@@ -99,6 +99,7 @@ def item(
         tags=tuple(tag.casefold() for tag in tags),
         min_apl=min_apl,
         max_apl=max_apl,
+        base_price=base_price,
         session_eligible=session_eligible,
         dwarfy_sell_eligible=dwarfy_sell_eligible,
         variant_type=variant_type,
@@ -120,14 +121,14 @@ class SheetParsingTests(unittest.TestCase):
         cache = make_cache()
         return cache, cache._load_bot_items(FakeSpreadsheet(rows))
 
-    def test_roll_rarity_drives_session_pool_but_rarity_drives_pricing(self):
-        row = item(name="Rare Rolled Low", rarity="Rare", roll_rarity="Uncommon")
+    def test_roll_rarity_drives_session_pool_but_base_price_drives_pricing(self):
+        row = item(name="Rare Rolled Low", rarity="Rare", roll_rarity="Uncommon", base_price=2500)
         cache = make_cache([row])
 
         pool = cache.loot_pool(rarity="Uncommon", consumable=False, apl=3)
 
         self.assertEqual(pool, [row])
-        self.assertEqual(base_price_for_rarity(row.rarity), 4000)
+        self.assertEqual(direct_sell_price(row.base_price).seller_payout, 1000)
 
     def test_blank_roll_rarity_is_excluded_from_session_loot(self):
         row = item(name="No Roll", rarity="Rare", roll_rarity="")
@@ -171,6 +172,28 @@ class SheetParsingTests(unittest.TestCase):
 
         self.assertEqual([loaded.weight for loaded in items], [1, 1, 1, 1])
         self.assertEqual(len([warning for warning in cache.warnings if "invalid Weight" in warning]), 4)
+
+    def test_base_price_parses_whole_gp_values(self):
+        rows = [
+            ["Item Name", "Rarity", "Roll Rarity", "Base Price", "Consumable", "Allowed", "Session Eligible"],
+            ["Cloak", "Uncommon", "Uncommon", "4,000gp", "FALSE", "TRUE", "TRUE"],
+        ]
+        _cache, items = self.load_items(rows)
+
+        self.assertEqual(items[0].base_price, 4000)
+
+    def test_invalid_base_price_warns_and_disables_dwarfy_pricing(self):
+        rows = [
+            ["Item Name", "Rarity", "Roll Rarity", "Base Price", "Consumable", "Allowed", "Session Eligible"],
+            ["Blank", "Uncommon", "Uncommon", "", "FALSE", "TRUE", "TRUE"],
+            ["Zero", "Uncommon", "Uncommon", "0", "FALSE", "TRUE", "TRUE"],
+            ["Fraction", "Uncommon", "Uncommon", "1.5", "FALSE", "TRUE", "TRUE"],
+            ["Text", "Uncommon", "Uncommon", "abc", "FALSE", "TRUE", "TRUE"],
+        ]
+        cache, items = self.load_items(rows)
+
+        self.assertEqual([loaded.base_price for loaded in items], [None, None, None, None])
+        self.assertEqual(len([warning for warning in cache.warnings if "invalid Base Price" in warning]), 3)
 
     def test_source_is_preserved_and_source_code_is_reference_only(self):
         row = item(name="Heliana Thing", source="HGtMH", source_code="hgtmh")
@@ -470,7 +493,7 @@ class MonsterComponentTests(unittest.TestCase):
 class DwarfySaleMechanicTests(unittest.TestCase):
     def test_direct_sell_pays_40_percent_and_does_not_roll(self):
         with patch("services.pricing.random.randint") as randint:
-            result = direct_sell_price("Rare")
+            result = direct_sell_price(4000)
 
         randint.assert_not_called()
         self.assertEqual(result.base_price, 4000)
@@ -520,7 +543,7 @@ class DwarfySaleMechanicTests(unittest.TestCase):
 
         for roll, percent, payout, text in cases:
             with self.subTest(roll=roll), patch("services.pricing.random.randint", return_value=roll):
-                result = roll_broker_price("Rare")
+                result = roll_broker_price(4000)
 
             self.assertEqual(result.roll, roll)
             self.assertEqual(result.payout_percent, percent)
@@ -531,19 +554,19 @@ class DwarfySaleMechanicTests(unittest.TestCase):
         from cogs.dwarfy import broker_sale_result_line
 
         with patch("services.pricing.random.randint", return_value=18):
-            result = broker_sale_result_line(roll_broker_price("Rare"))
+            result = broker_sale_result_line(roll_broker_price(4000))
 
         self.assertEqual(
             result,
             "🎲 Broker roll: 18 - Strong buyer, 60% of base price - payout 2,400gp.",
         )
 
-    def test_actual_rarity_is_used_for_direct_and_broker_pricing(self):
-        row = item(name="Rare Rolled Low", rarity="Rare", roll_rarity="Uncommon")
+    def test_base_price_is_used_for_direct_and_broker_pricing(self):
+        row = item(name="Rare Rolled Low", rarity="Rare", roll_rarity="Uncommon", base_price=2500)
 
-        self.assertEqual(direct_sell_price(row.rarity).seller_payout, 1600)
+        self.assertEqual(direct_sell_price(row.base_price).seller_payout, 1000)
         with patch("services.pricing.random.randint", return_value=20):
-            self.assertEqual(roll_broker_price(row.rarity).seller_payout, 4000)
+            self.assertEqual(roll_broker_price(row.base_price).seller_payout, 2500)
 
     def test_database_records_direct_sale_inventory(self):
         from services.database import DwarfyDatabase
@@ -758,36 +781,24 @@ class DwarfySaleMechanicTests(unittest.TestCase):
         self.assertIn("Item status: inventory", output)
         self.assertIn("Stored Adventure Log Receipt:", output)
 
-    def test_shared_validation_rejects_consumables_and_artifacts(self):
+    def test_shared_validation_rejects_consumables_and_missing_base_price(self):
         from cogs.dwarfy import sell_validation_error
 
         self.assertIn("Consumable=TRUE", sell_validation_error(item("Potion", consumable=True)))
-        self.assertIn("cannot price", sell_validation_error(item("Artifact", rarity="Artifact")))
+        self.assertIn("Base Price", sell_validation_error(item("No Price", base_price=None)))
 
 
 class DwarfyBuyHagglingTests(unittest.TestCase):
-    def test_uncommon_buy_uses_one_d6_for_base_asking_price(self):
-        cases = [
-            (1, 100),
-            (2, 200),
-            (3, 300),
-            (4, 400),
-            (5, 500),
-            (6, 600),
-        ]
-        for d6_roll, expected_price in cases:
-            with self.subTest(d6_roll=d6_roll), patch(
-                "services.pricing.random.randint",
-                side_effect=[d6_roll, 14],
-            ):
-                result = roll_buy_price("Uncommon", 0)
+    def test_buy_uses_sheet_base_price_for_base_asking_price(self):
+        with patch("services.pricing.random.randint", return_value=14):
+            result = roll_buy_price(4000, 0)
 
-            self.assertEqual(result.rolled_price, expected_price)
-            self.assertIn(f"1d6 x 100gp = {d6_roll} x 100gp = {expected_price}gp", result.roll_detail)
+        self.assertEqual(result.rolled_price, 4000)
+        self.assertEqual(result.roll_detail, "Base Price = 4000gp")
 
     def test_nat_20_applies_20_percent_discount(self):
-        with patch("services.pricing.random.randint", side_effect=[6, 20]):
-            result = roll_buy_price("Uncommon", 100)
+        with patch("services.pricing.random.randint", return_value=20):
+            result = roll_buy_price(600, 100)
 
         self.assertEqual(result.rolled_price, 600)
         self.assertEqual(result.haggling_roll, 20)
@@ -799,17 +810,17 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         for haggling_roll in (16, 19):
             with self.subTest(haggling_roll=haggling_roll), patch(
                 "services.pricing.random.randint",
-                side_effect=[6, haggling_roll],
+                return_value=haggling_roll,
             ):
-                result = roll_buy_price("Uncommon", 100)
+                result = roll_buy_price(600, 100)
 
             self.assertEqual(result.discount_percent, 10)
             self.assertEqual(result.discounted_price, 540)
             self.assertEqual(result.final_price, 540)
 
     def test_roll_15_applies_5_percent_discount(self):
-        with patch("services.pricing.random.randint", side_effect=[4, 15]):
-            result = roll_buy_price("Uncommon", 100)
+        with patch("services.pricing.random.randint", return_value=15):
+            result = roll_buy_price(400, 100)
 
         self.assertEqual(result.discount_percent, 5)
         self.assertEqual(result.discounted_price, 380)
@@ -819,9 +830,9 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         for haggling_roll in (2, 14):
             with self.subTest(haggling_roll=haggling_roll), patch(
                 "services.pricing.random.randint",
-                side_effect=[4, haggling_roll],
+                return_value=haggling_roll,
             ):
-                result = roll_buy_price("Uncommon", 100)
+                result = roll_buy_price(400, 100)
 
             self.assertEqual(result.discount_percent, 0)
             self.assertEqual(result.discounted_price, 400)
@@ -829,11 +840,11 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
             self.assertEqual(result.haggling_result, "Dwarfy does not budge.")
 
     def test_nat_1_applies_no_discount_and_includes_insult(self):
-        with patch("services.pricing.random.randint", side_effect=[4, 1]), patch(
+        with patch("services.pricing.random.randint", return_value=1), patch(
             "services.pricing.random.choice",
             return_value="No discount. The item is magical. Your bargaining was not.",
         ):
-            result = roll_buy_price("Common", 25)
+            result = roll_buy_price(50, 25)
 
         self.assertEqual(result.haggling_roll, 1)
         self.assertEqual(result.discount_percent, 0)
@@ -842,19 +853,19 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         self.assertEqual(result.insult_line, "No discount. The item is magical. Your bargaining was not.")
 
     def test_nat_1_does_not_increase_price_or_create_debt_by_itself(self):
-        with patch("services.pricing.random.randint", side_effect=[4, 1]), patch(
+        with patch("services.pricing.random.randint", return_value=1), patch(
             "services.pricing.random.choice",
             return_value="Full price. I would explain why, but then I would have to charge tutoring rates.",
         ):
-            result = roll_buy_price("Common", 25)
+            result = roll_buy_price(50, 25)
 
         debt_owed = max(0, result.final_price - 100)
         self.assertEqual(result.final_price, result.rolled_price)
         self.assertEqual(debt_owed, 0)
 
     def test_rolls_below_nat_20_never_lower_final_price_below_cost_basis(self):
-        with patch("services.pricing.random.randint", side_effect=[2, 16]):
-            result = roll_buy_price("Uncommon", 300)
+        with patch("services.pricing.random.randint", return_value=16):
+            result = roll_buy_price(200, 300)
 
         self.assertEqual(result.rolled_price, 200)
         self.assertEqual(result.discounted_price, 180)
@@ -862,8 +873,8 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         self.assertTrue(result.cost_basis_floor_applied)
 
     def test_nat_20_can_lower_final_price_below_cost_basis(self):
-        with patch("services.pricing.random.randint", side_effect=[2, 20]):
-            result = roll_buy_price("Uncommon", 300)
+        with patch("services.pricing.random.randint", return_value=20):
+            result = roll_buy_price(200, 300)
 
         self.assertEqual(result.rolled_price, 200)
         self.assertEqual(result.discounted_price, 160)
@@ -873,8 +884,8 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
         self.assertTrue(result.cost_basis_exception_applied)
 
     def test_possible_buy_price_range_includes_best_haggling_discount(self):
-        self.assertEqual(possible_final_price_range("Common", 0), (16, 70))
-        self.assertEqual(possible_final_price_range("Uncommon", 320), (80, 600))
+        self.assertEqual(possible_final_price_range(100, 0), (80, 100))
+        self.assertEqual(possible_final_price_range(400, 500), (320, 500))
 
     def test_buy_receipt_has_no_dtp_or_shop_expense(self):
         from cogs.dwarfy import build_buy_receipt
@@ -886,8 +897,8 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
             "page": "234",
             "cost_basis": 100,
         }
-        with patch("services.pricing.random.randint", side_effect=[6, 20]):
-            result = roll_buy_price("Uncommon", 100)
+        with patch("services.pricing.random.randint", return_value=20):
+            result = roll_buy_price(600, 100)
 
         receipt = build_buy_receipt(
             buyer="@Buyer",
@@ -915,8 +926,8 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
             "cost_basis": 1000,
             "minimum_tier": 2,
         }
-        with patch("services.pricing.random.randint", side_effect=[3, 4, 18]):
-            result = roll_buy_price("Rare", 1000)
+        with patch("services.pricing.random.randint", return_value=18):
+            result = roll_buy_price(7000, 1000)
 
         receipt = build_buy_receipt(
             buyer="@Buyer",
@@ -928,7 +939,7 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
             gold_available=7000,
         )
 
-        self.assertIn("Xanathar price roll: 2d10 x 1,000gp = (3 + 4) x 1,000gp = 7000gp", receipt)
+        self.assertIn("Dwarfy base price: 7,000gp", receipt)
         self.assertIn("Dwarfy haggling roll: 18", receipt)
         self.assertIn("Haggling result: Strong haggling, 10% discount", receipt)
         self.assertIn("Minimum Tier: Tier 2 (Level 5+)", receipt)
@@ -937,8 +948,8 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
     def test_buy_haggling_result_line_highlights_cost_basis_floor(self):
         from cogs.dwarfy import buy_haggling_result_line
 
-        with patch("services.pricing.random.randint", side_effect=[2, 16]):
-            result = roll_buy_price("Uncommon", 300)
+        with patch("services.pricing.random.randint", return_value=16):
+            result = roll_buy_price(200, 300)
 
         line = buy_haggling_result_line(result, 300)
 
@@ -949,8 +960,8 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
     def test_buy_haggling_result_line_highlights_nat_20_floor_exception(self):
         from cogs.dwarfy import buy_haggling_result_line
 
-        with patch("services.pricing.random.randint", side_effect=[2, 20]):
-            result = roll_buy_price("Uncommon", 300)
+        with patch("services.pricing.random.randint", return_value=20):
+            result = roll_buy_price(200, 300)
 
         line = buy_haggling_result_line(result, 300)
 
@@ -988,7 +999,7 @@ class DwarfyBuyHagglingTests(unittest.TestCase):
                         buyer_display_name="Buyer",
                         buyer_character_name="Jimmy",
                         buyer_character_level=1,
-                        buy_price_roll_detail="1d6 x 100gp = 6 x 100gp = 600gp",
+                        buy_price_roll_detail="Base Price = 600gp",
                         final_sale_price=540,
                         realized_profit=300,
                         buyer_gold_available=1000,
@@ -1269,9 +1280,11 @@ class MatchingAndDwarfyTests(unittest.TestCase):
             item("Ring of Protection", rarity="Rare", roll_rarity="Rare"),
             item("Potion of Healing", consumable=True),
             item("Blocked", dwarfy_sell_eligible=False),
+            item("No Base Price", base_price=None),
         ])
 
         self.assertEqual(cache.autocomplete_sell_item_names("ring"), ["Ring of Protection"])
+        self.assertNotIn("No Base Price", cache.autocomplete_sell_item_names(""))
 
     def test_ring_of_protection_sells_as_clean_name_with_enriched_data(self):
         row = item(
@@ -1331,6 +1344,15 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         error = sell_validation_error(item("Blocked", dwarfy_sell_eligible=False))
 
         self.assertIn("Dwarfy Sell Eligible=FALSE", error)
+
+    def test_missing_base_price_rejects_direct_and_broker_sale_but_match_still_resolves(self):
+        from cogs.dwarfy import sell_validation_error
+
+        cache = make_cache([item("Classified Only", base_price=None)])
+        match = cache.match_item("Classified Only", for_sell=True)
+
+        self.assertEqual(match.item.name, "Classified Only")
+        self.assertIn("classifieds", sell_validation_error(match.item))
 
     def test_dwarfy_sell_details_resolve_listing_name(self):
         from cogs.dwarfy import resolved_listing_name
@@ -1500,9 +1522,9 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertIn("Adventure Log Receipt", fetched["receipt_text"])
 
     def test_existing_buy_pricing_still_uses_floor(self):
-        self.assertEqual(possible_final_price_range("Uncommon", 320), (80, 600))
-        with patch("services.pricing.random.randint", return_value=1):
-            roll = roll_buy_price("Uncommon", 400)
+        self.assertEqual(possible_final_price_range(400, 320), (320, 400))
+        with patch("services.pricing.random.randint", return_value=14):
+            roll = roll_buy_price(400, 400)
         self.assertEqual(roll.final_price, 400)
 
     def test_owner_stock_origin_text_is_not_a_fake_seller(self):
@@ -1542,6 +1564,7 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         cache = make_cache(
             [
                 item("Uncommon Permanent", rarity="Uncommon", roll_rarity="Uncommon", consumable=False),
+                item("No Price Permanent", rarity="Uncommon", roll_rarity="Uncommon", consumable=False, base_price=None),
                 item("Monster Trigger", rarity="Common", roll_rarity="Common", loot_type="Monster Component"),
             ]
         )
@@ -1559,6 +1582,7 @@ class MatchingAndDwarfyTests(unittest.TestCase):
                 item("Bag of Holding", consumable=False),
                 item("Bag of Holding", consumable=False, min_apl=5),
                 item("Potion of Healing", consumable=True),
+                item("No Price", consumable=False, base_price=None),
                 item("Forbidden Item", allowed=False),
                 item("Monster Trigger", loot_type="Monster Component"),
             ]
@@ -1643,8 +1667,8 @@ class MatchingAndDwarfyTests(unittest.TestCase):
             "page": "234",
             "cost_basis": 160,
         }
-        with patch("services.pricing.random.randint", side_effect=[6, 14]):
-            result = roll_buy_price("Uncommon", 160)
+        with patch("services.pricing.random.randint", return_value=14):
+            result = roll_buy_price(400, 160)
 
         receipt = build_buy_receipt(
             buyer="@Buyer",

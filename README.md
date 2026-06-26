@@ -143,6 +143,7 @@ Item Name
 Rarity
 Roll Rarity
 Weight
+Base Price
 Consumable
 Allowed
 Loot Type
@@ -179,8 +180,11 @@ Rules:
 - The bot tolerates extra columns and ignores columns it does not need.
 - Do not rename required columns.
 - `Item Name` is the name shown in Discord.
-- `Rarity` is the actual item rarity and is used by Dwarfy pricing.
+- `Rarity` is the actual item rarity shown to players. It is not used for Dwarfy money math.
 - `Roll Rarity` is the rarity bucket used by `/sessionloot`.
+- `Base Price` is the item economy value used by `/dwarfy sell`, `/dwarfy broker`, `/dwarfy stock_add`, `/dwarfy stock_random`, `/dwarfy browse`, `/dwarfy inspect`, and `/dwarfy buy`.
+- Blank `Base Price` means Dwarfy cannot directly buy, broker, stock, or sell that item. It will not autocomplete for Dwarfy sell/broker/stock. Players can still post it in classifieds because the seller chooses the asking price there.
+- `Base Price` must be a positive whole number. Commas and `gp` are okay, such as `4,000gp`. Invalid values create a reload warning and disable Dwarfy shop pricing for that row.
 - Blank `Roll Rarity` excludes a row from session loot.
 - If the whole `Roll Rarity` column is missing, the bot falls back to `Rarity` for older sheets.
 - `Weight` is relative probability for session loot.
@@ -455,7 +459,7 @@ Registration does not check character sheets. It is only a convenience layer so 
 
 `/dwarfy buy` asks for the character's available gold. Dwarfy already owns the listed item; there is no outside seller search.
 
-The bot first rolls the normal Xanathar-style asking price for the item's rarity. Then it rolls a flat `1d20` Dwarfy haggling roll:
+The bot uses the item's sheet `Base Price` for shop pricing. Rarity is still displayed, but Dwarfy money math is no longer based on rarity. After the Base Price is chosen, Dwarfy rolls a flat `1d20` haggling roll:
 
 - `20`: 20% discount.
 - `16-19`: 10% discount.
@@ -463,7 +467,7 @@ The bot first rolls the normal Xanathar-style asking price for the item's rarity
 - `2-14`: no discount.
 - `1`: no discount and Dwarfy insults the buyer, but there is no mechanical penalty.
 
-The haggling roll can only reduce the item price. Dwarfy normally refuses to sell below his cost basis, but a natural 20 haggling roll is the one exception: on a 20, the 20% discounted price can go below what Dwarfy paid. `/dwarfy buy` has no DTP cost and no flat shop/search expense; only the final item price matters.
+The haggling roll can only reduce the item price. Dwarfy normally refuses to sell below his cost basis, but a natural 20 haggling roll is the one exception: on a 20, the 20% discounted Base Price can go below what Dwarfy paid. `/dwarfy buy` has no DTP cost and no flat shop/search expense; only the final item price matters.
 
 If the buyer's submitted character level is below the item's minimum tier, Dwarfy still allows the purchase but adds a bold public warning near the top of the receipt. This is an audit reminder that the character may not use the item under server rules until they reach that tier.
 

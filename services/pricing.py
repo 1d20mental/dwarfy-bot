@@ -91,13 +91,21 @@ def base_price_for_rarity(rarity: str) -> int:
     return BASE_PRICES[rarity]
 
 
-def direct_sell_price(rarity: str) -> SellRoll:
+def _validate_base_price(base_price: int) -> int:
+    """Return a positive whole-number base price or raise a clear error."""
+    price = int(base_price)
+    if price < 1:
+        raise ValueError("Base price must be at least 1gp.")
+    return price
+
+
+def direct_sell_price(base_price: int) -> SellRoll:
     """Return the guaranteed direct-sale payout.
 
     Direct sale is intentionally boring: no DTP, no gold fee, no d20 roll, and
     a fixed 40% payout.
     """
-    base_price = base_price_for_rarity(rarity)
+    base_price = _validate_base_price(base_price)
     payout = (base_price * 40) // 100
     return SellRoll(
         roll=0,
@@ -108,9 +116,9 @@ def direct_sell_price(rarity: str) -> SellRoll:
     )
 
 
-def roll_broker_price(rarity: str) -> SellRoll:
+def roll_broker_price(base_price: int) -> SellRoll:
     """Roll the downtime brokered player-to-shop sale result."""
-    base_price = base_price_for_rarity(rarity)
+    base_price = _validate_base_price(base_price)
     roll = random.randint(1, 20)
 
     if roll == 20:
@@ -142,57 +150,32 @@ def roll_broker_price(rarity: str) -> SellRoll:
     )
 
 
-def roll_sell_price(rarity: str) -> SellRoll:
+def roll_sell_price(base_price: int) -> SellRoll:
     """Backward-compatible name for the brokered sale roll."""
-    return roll_broker_price(rarity)
+    return roll_broker_price(base_price)
 
 
-def buy_price_formula(rarity: str) -> str:
+def buy_price_formula(base_price: int) -> str:
     """Return the asking price formula shown in inspect/buy output."""
-    if rarity not in BUY_PRICE_RANGES:
-        raise ValueError(f"Unsupported rarity: {rarity}")
-    return BUY_PRICE_RANGES[rarity][2]
+    base_price = _validate_base_price(base_price)
+    return f"Base Price = {base_price}gp, then Dwarfy haggling may discount it"
 
 
-def possible_final_price_range(rarity: str, cost_basis: int) -> tuple[int, int]:
+def possible_final_price_range(base_price: int, cost_basis: int) -> tuple[int, int]:
     """Return the lowest and highest possible final buy price.
 
     Haggling can reduce the low end by up to 20%. A natural 20 is the only time
     Dwarfy lets the final price drop below his cost basis.
     """
-    if rarity not in BUY_PRICE_RANGES:
-        raise ValueError(f"Unsupported rarity: {rarity}")
-    roll_min, roll_max, _formula = BUY_PRICE_RANGES[rarity]
-    best_discounted_min = (roll_min * 80) // 100
-    return best_discounted_min, max(roll_max, cost_basis)
+    base_price = _validate_base_price(base_price)
+    best_discounted_min = (base_price * 80) // 100
+    return best_discounted_min, max(base_price, int(cost_basis))
 
 
-def roll_buy_price(rarity: str, cost_basis: int) -> BuyRoll:
-    """Roll the shop-to-player asking price, haggling, and Dwarfy's floor."""
-    if rarity == "Common":
-        d6 = random.randint(1, 6)
-        rolled = (d6 + 1) * 10
-        detail = f"(1d6 + 1) x 10gp = ({d6} + 1) x 10gp = {rolled}gp"
-    elif rarity == "Uncommon":
-        d6 = random.randint(1, 6)
-        rolled = d6 * 100
-        detail = f"1d6 x 100gp = {d6} x 100gp = {rolled}gp"
-    elif rarity == "Rare":
-        d10_a = random.randint(1, 10)
-        d10_b = random.randint(1, 10)
-        rolled = (d10_a + d10_b) * 1_000
-        detail = f"2d10 x 1,000gp = ({d10_a} + {d10_b}) x 1,000gp = {rolled}gp"
-    elif rarity == "Very Rare":
-        d4 = random.randint(1, 4)
-        rolled = (d4 + 1) * 10_000
-        detail = f"(1d4 + 1) x 10,000gp = ({d4} + 1) x 10,000gp = {rolled}gp"
-    elif rarity == "Legendary":
-        d6_a = random.randint(1, 6)
-        d6_b = random.randint(1, 6)
-        rolled = (d6_a + d6_b) * 25_000
-        detail = f"2d6 x 25,000gp = ({d6_a} + {d6_b}) x 25,000gp = {rolled}gp"
-    else:
-        raise ValueError(f"Unsupported rarity: {rarity}")
+def roll_buy_price(base_price: int, cost_basis: int) -> BuyRoll:
+    """Roll Dwarfy haggling against the sheet's fixed Base Price."""
+    rolled = _validate_base_price(base_price)
+    detail = f"Base Price = {rolled}gp"
 
     haggling_roll = random.randint(1, 20)
     insult_line = None
