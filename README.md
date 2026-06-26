@@ -366,7 +366,7 @@ If Google Sheets cannot load, the bot still starts when possible. Sheet-dependen
 
 After that, test the shop flow:
 
-1. Run `/dwarfy character_add name:Name level:5`.
+1. Run `/dwarfy character action:Add or update name:Name level:5`.
 2. In the sell channel, run `/dwarfy sell character:Name level:5 item:Bag of Holding`.
 3. In the sell channel, run `/dwarfy broker character:Name level:5 item:Bag of Holding`.
 4. For a generic/template item, run `/dwarfy sell character:Name level:5 item:+1 Weapon variant:Longsword`.
@@ -381,11 +381,7 @@ After that, test the shop flow:
 
 - `/dwarfy ping`
 - `/dwarfy help`
-- `/dwarfy character_add`
-- `/dwarfy character_update`
-- `/dwarfy character_list`
-- `/dwarfy character_set_active`
-- `/dwarfy character_retire`
+- `/dwarfy character`
 - `/dwarfy sell`
 - `/dwarfy broker`
 - `/dwarfy browse`
@@ -438,14 +434,14 @@ Wrong-channel errors are private.
 
 Character registration is optional, but it makes Dwarfy easier to use.
 
-Use `/dwarfy character_add name:<character> level:<level>` to save one of your characters. Use `make_active:True` if you want that character marked as your active/default character. The first active registered character becomes active automatically.
+Use `/dwarfy character action:Add or update name:<character> level:<level>` to save one of your characters. Use `make_active:True` if you want that character marked as your active/default character. The first active registered character becomes active automatically.
 
 Useful commands:
 
-- `/dwarfy character_list` privately shows your saved characters.
-- `/dwarfy character_update` updates a saved character's level.
-- `/dwarfy character_set_active` changes your active/default character.
-- `/dwarfy character_retire` hides an old character from autocomplete.
+- `/dwarfy character action:List` privately shows your saved characters.
+- `/dwarfy character action:Add or update` updates a saved character's level.
+- `/dwarfy character action:Set active` changes your active/default character.
+- `/dwarfy character action:Retire` hides an old character from autocomplete.
 
 Character fields on `/dwarfy sell`, `/dwarfy broker`, `/dwarfy buy`, `/dwarfy classified_post`, and `/dwarfy classified_buy` autocomplete your saved character names. Successful transactions also remember the submitted character name and level for future autocomplete.
 

@@ -1837,7 +1837,7 @@ class HelpCommandTests(unittest.TestCase):
         text = "\n".join([embed.title or "", embed.description or ""] + [field.value for field in embed.fields])
 
         self.assertIn("/sessionloot", text)
-        self.assertIn("/dwarfy character_add", text)
+        self.assertIn("/dwarfy character", text)
         self.assertIn("/dwarfy browse", text)
         self.assertIn("/dwarfy sell", text)
         self.assertIn("/dwarfy classified_post", text)
@@ -1873,8 +1873,8 @@ class HelpCommandTests(unittest.TestCase):
         embed = build_help_embed("characters")
         text = "\n".join([embed.description or ""] + [field.value for field in embed.fields])
 
-        self.assertIn("/dwarfy character_add", text)
-        self.assertIn("/dwarfy character_list", text)
+        self.assertIn("/dwarfy character", text)
+        self.assertIn("action:List", text)
         self.assertIn("autocomplete", text)
 
     def test_help_channel_topic_explains_privacy(self):

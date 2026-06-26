@@ -50,6 +50,12 @@ BROWSE_RARITY_CHOICES = [
     app_commands.Choice(name="Legendary", value="Legendary"),
 ]
 BROWSE_RARITY_VALUES = {choice.value for choice in BROWSE_RARITY_CHOICES}
+CHARACTER_ACTION_CHOICES = [
+    app_commands.Choice(name="Add or update", value="save"),
+    app_commands.Choice(name="List", value="list"),
+    app_commands.Choice(name="Set active", value="set_active"),
+    app_commands.Choice(name="Retire", value="retire"),
+]
 HELP_TOPIC_CHOICES = [
     app_commands.Choice(name="Overview", value="overview"),
     app_commands.Choice(name="Session Loot", value="sessionloot"),
@@ -194,11 +200,11 @@ def character_choice_label(character: dict[str, Any]) -> str:
 
 
 def build_character_list_output(characters: list[dict[str, Any]]) -> str:
-    """Build the private `/dwarfy character_list` response."""
+    """Build the private character registry list response."""
     if not characters:
         return (
             "You do not have any registered Dwarfy characters yet.\n\n"
-            "Use `/dwarfy character_add name:<character> level:<level>` to register one."
+            "Use `/dwarfy character action:Add or update name:<character> level:<level>` to register one."
         )
     lines = ["Your registered Dwarfy characters:", ""]
     for character in characters:
@@ -1191,7 +1197,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             embed,
             "Register",
             [
-                "`/dwarfy character_add name:<character> level:<1-20>` saves or restores one character.",
+                "`/dwarfy character action:Add or update name:<character> level:<1-20>` saves or restores one character.",
                 "`make_active:True` marks that character as your active/default Dwarfy character.",
                 "The first registered active character becomes active automatically.",
             ],
@@ -1200,10 +1206,10 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             embed,
             "Manage",
             [
-                "`/dwarfy character_update name:<character> level:<1-20>` updates a saved level.",
-                "`/dwarfy character_set_active name:<character>` changes your active character.",
-                "`/dwarfy character_retire name:<character>` hides an old character from autocomplete.",
-                "`/dwarfy character_list` privately lists your registered characters.",
+                "`/dwarfy character action:List` privately lists your registered characters.",
+                "`/dwarfy character action:Set active name:<character>` changes your active character.",
+                "`/dwarfy character action:Retire name:<character>` hides an old character from autocomplete.",
+                "Run Add or update again to update a saved level.",
             ],
         )
         _help_field(
@@ -1404,7 +1410,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
         [
             "`/dwarfy ping` checks whether the shop is open.",
             "`/dwarfy help topic:<topic>` shows a focused guide.",
-            "`/dwarfy character_add name:<name> level:<level>` saves character names for autocomplete.",
+            "`/dwarfy character action:Add or update name:<name> level:<level>` saves character names for autocomplete.",
             "`/sessionloot players:<count> apl:<level>` rolls public session loot.",
         ],
     )
@@ -1412,7 +1418,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
         embed,
         "Player Shop Commands",
         [
-            "`/dwarfy character_list` - privately list your saved characters.",
+            "`/dwarfy character` - save, list, activate, or retire your characters.",
             "`/dwarfy browse` - privately browse Dwarfy inventory.",
             "`/dwarfy inspect` - view item details and buttons.",
             "`/dwarfy buy` - buy by `DWF-` listing ID.",
@@ -1647,153 +1653,110 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 break
         return choices
 
-    @app_commands.command(name="character_add", description="Register one of your characters for Dwarfy autocomplete.")
+    @app_commands.command(name="character", description="Save, list, activate, or retire your Dwarfy characters.")
     @app_commands.describe(
-        name="Character name to save.",
-        level="Current character level.",
-        make_active="Mark this as your active/default Dwarfy character.",
+        action="What to do with your character registry.",
+        name="Character name for add/update, set active, or retire.",
+        level="Character level for add/update.",
+        make_active="Mark this character as your active/default character.",
+        include_retired="When listing, include retired characters.",
     )
-    async def character_add(
+    @app_commands.choices(action=CHARACTER_ACTION_CHOICES)
+    async def character(
         self,
         interaction: discord.Interaction,
-        name: str,
-        level: app_commands.Range[int, 1, 20],
+        action: str,
+        name: str | None = None,
+        level: int | None = None,
         make_active: bool = False,
+        include_retired: bool = False,
     ) -> None:
-        character_name = clean_character_name(name)
-        if not character_name:
-            await interaction.response.send_message("Give me a real character name to save.", ephemeral=True)
+        if action == "list":
+            rows = await self.bot.db.list_characters(
+                user_id=str(interaction.user.id),
+                include_retired=include_retired,
+            )
+            await interaction.response.send_message(build_character_list_output(rows), ephemeral=True)
             return
-        row = await self.bot.db.save_character(
-            user_id=str(interaction.user.id),
-            user_display_name=_display_name(interaction.user),
-            character_name=character_name,
-            character_level=int(level),
-            make_default=make_active,
-        )
-        active_text = "yes" if int(row.get("is_default") or 0) else "no"
-        await interaction.response.send_message(
-            (
-                "Character saved.\n\n"
-                f"Name: {row['character_name']}\n"
-                f"Level: {row['character_level']}\n"
-                f"Active: {active_text}\n\n"
-                "Dwarfy command character fields will autocomplete this name."
-            ),
-            ephemeral=True,
-        )
 
-    @app_commands.command(name="character_update", description="Update one of your registered Dwarfy characters.")
-    @app_commands.describe(
-        name="Registered character name.",
-        level="New character level.",
-        make_active="Also mark this as your active/default Dwarfy character.",
-    )
-    async def character_update(
-        self,
-        interaction: discord.Interaction,
-        name: str,
-        level: app_commands.Range[int, 1, 20],
-        make_active: bool = False,
-    ) -> None:
-        character_name = clean_character_name(name)
-        existing = await self.bot.db.get_character(
-            user_id=str(interaction.user.id),
-            character_name=character_name,
-        )
-        if existing is None:
+        character_name = clean_character_name(name or "")
+        if not character_name:
             await interaction.response.send_message(
-                "I do not have that character registered for you yet. Use `/dwarfy character_add` first.",
+                "Give me a character name for that character action.",
                 ephemeral=True,
             )
             return
-        row = await self.bot.db.save_character(
-            user_id=str(interaction.user.id),
-            user_display_name=_display_name(interaction.user),
-            character_name=character_name,
-            character_level=int(level),
-            make_default=make_active,
-        )
-        active_text = "yes" if int(row.get("is_default") or 0) else "no"
-        await interaction.response.send_message(
-            f"Character updated: {row['character_name']} ({row['character_level']}). Active: {active_text}.",
-            ephemeral=True,
-        )
 
-    @character_update.autocomplete("name")
-    async def character_update_autocomplete(
+        if action == "save":
+            if level is None or level < 1 or level > 20:
+                await interaction.response.send_message(
+                    "Give me a character level from 1 to 20 for Add or update.",
+                    ephemeral=True,
+                )
+                return
+            row = await self.bot.db.save_character(
+                user_id=str(interaction.user.id),
+                user_display_name=_display_name(interaction.user),
+                character_name=character_name,
+                character_level=int(level),
+                make_default=make_active,
+            )
+            active_text = "yes" if int(row.get("is_default") or 0) else "no"
+            await interaction.response.send_message(
+                (
+                    "Character saved.\n\n"
+                    f"Name: {row['character_name']}\n"
+                    f"Level: {row['character_level']}\n"
+                    f"Active: {active_text}\n\n"
+                    "Dwarfy command character fields will autocomplete this name."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if action == "set_active":
+            row = await self.bot.db.set_default_character(
+                user_id=str(interaction.user.id),
+                character_name=character_name,
+            )
+            if row is None:
+                await interaction.response.send_message(
+                    "I could not find an active registered character with that name.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(
+                f"Active Dwarfy character set to {row['character_name']} ({row['character_level']}).",
+                ephemeral=True,
+            )
+            return
+
+        if action == "retire":
+            row = await self.bot.db.retire_character(
+                user_id=str(interaction.user.id),
+                character_name=character_name,
+            )
+            if row is None:
+                await interaction.response.send_message(
+                    "I could not find an active registered character with that name.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(
+                f"Retired {row['character_name']} ({row['character_level']}) from Dwarfy autocomplete.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message("Choose one of the listed character actions.", ephemeral=True)
+
+    @character.autocomplete("name")
+    async def character_name_autocomplete(
         self,
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
         return await self._character_name_choices(interaction, current, include_retired=True)
-
-    @app_commands.command(name="character_list", description="Privately list your registered Dwarfy characters.")
-    @app_commands.describe(include_retired="Also show retired characters.")
-    async def character_list(
-        self,
-        interaction: discord.Interaction,
-        include_retired: bool = False,
-    ) -> None:
-        rows = await self.bot.db.list_characters(
-            user_id=str(interaction.user.id),
-            include_retired=include_retired,
-        )
-        await interaction.response.send_message(build_character_list_output(rows), ephemeral=True)
-
-    @app_commands.command(name="character_set_active", description="Choose your active/default Dwarfy character.")
-    @app_commands.describe(name="Registered character name.")
-    async def character_set_active(self, interaction: discord.Interaction, name: str) -> None:
-        character_name = clean_character_name(name)
-        row = await self.bot.db.set_default_character(
-            user_id=str(interaction.user.id),
-            character_name=character_name,
-        )
-        if row is None:
-            await interaction.response.send_message(
-                "I could not find an active registered character with that name.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            f"Active Dwarfy character set to {row['character_name']} ({row['character_level']}).",
-            ephemeral=True,
-        )
-
-    @character_set_active.autocomplete("name")
-    async def character_set_active_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        return await self._character_name_choices(interaction, current)
-
-    @app_commands.command(name="character_retire", description="Retire a registered character from Dwarfy autocomplete.")
-    @app_commands.describe(name="Registered character name to retire.")
-    async def character_retire(self, interaction: discord.Interaction, name: str) -> None:
-        character_name = clean_character_name(name)
-        row = await self.bot.db.retire_character(
-            user_id=str(interaction.user.id),
-            character_name=character_name,
-        )
-        if row is None:
-            await interaction.response.send_message(
-                "I could not find an active registered character with that name.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            f"Retired {row['character_name']} ({row['character_level']}) from Dwarfy autocomplete.",
-            ephemeral=True,
-        )
-
-    @character_retire.autocomplete("name")
-    async def character_retire_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        return await self._character_name_choices(interaction, current)
 
     async def _resolve_sale_context(
         self,
