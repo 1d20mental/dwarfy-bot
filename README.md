@@ -18,7 +18,7 @@ Google Sheets is the master item reference. SQLite is the live shop inventory an
 - Lets players broker permanent magic-item sales with `/dwarfy broker`.
 - Lets players browse, inspect, and buy Dwarfy shop listings.
 - Lets players post and buy player-to-player classified listings with Dwarfy withholding a seller-paid broker commission.
-- Lets admins/mods run `/dwarfy stats`, `/dwarfy history`, `/dwarfy export`, `/dwarfy void`, and `/dwarfy reload`.
+- Lets admins/mods run `/dwarfy stats`, `/dwarfy history`, `/dwarfy export`, `/dwarfy edit_post`, `/dwarfy void`, and `/dwarfy reload`.
 - Rolls session loot with `/sessionloot`.
 
 The bot does not check character ownership, deduct DTP, deduct gold, or manage mundane equipment. Players should record all downtime and purchases manually on their adventure logs.
@@ -403,6 +403,7 @@ These require one of the role names in `ADMIN_ROLE_NAMES`:
 - `/dwarfy stats`
 - `/dwarfy history`
 - `/dwarfy export`
+- `/dwarfy edit_post`
 - `/dwarfy restock_status`
 - `/dwarfy debt_resolve`
 - `/dwarfy void`
@@ -493,6 +494,8 @@ Classified IDs use `DWC-00001`, `DWC-00002`, and so on. Inventory listings still
 `/dwarfy history` shows recent ledger rows privately. It can filter by listing/classified ID, entry type, status, and search text.
 
 `/dwarfy export` privately sends CSV files for `listings`, `ledger`, and `classifieds`. This is useful for reconciliation outside Discord.
+
+`/dwarfy edit_post` privately lets an admin/mod correct exact text in one Dwarfy Bot message by message link. It edits only messages authored by Dwarfy Bot, uses find/replace so dice results do not need to be rerolled, and records a `post_edit` ledger entry.
 
 `/dwarfy stats` is a private dashboard with active inventory, owner stock vs player stock, cash flow, realized profit, best flip, most expensive item, oldest unsold item, and top seller/buyer.
 

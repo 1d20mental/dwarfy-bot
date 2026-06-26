@@ -32,6 +32,7 @@ from services.sheets import (
     normalize_rarity,
 )
 from utils.formatting import (
+    DISCORD_MESSAGE_LIMIT,
     character_label,
     gp,
     mention_user,
@@ -42,6 +43,15 @@ from utils.formatting import (
 
 LISTING_ID_RE = re.compile(r"\bDWF\s*[-\u2010-\u2015\u2212]?\s*(\d+)\b", re.IGNORECASE)
 CLASSIFIED_ID_RE = re.compile(r"\bDWC\s*[-\u2010-\u2015\u2212]?\s*(\d+)\b", re.IGNORECASE)
+MESSAGE_LINK_RE = re.compile(
+    r"discord(?:app)?\.com/channels/(?:\d+|@me)/(?P<channel>\d{15,25})/(?P<message>\d{15,25})",
+    re.IGNORECASE,
+)
+MESSAGE_ID_PAIR_RE = re.compile(r"\b(?P<channel>\d{15,25})\D+(?P<message>\d{15,25})\b")
+CHARACTER_AUTOCOMPLETE_LABEL_RE = re.compile(
+    r"\s+\((?P<level>\d{1,2})\)(?:\s+-\s+(?:active|registered|retired))?\s*$",
+    re.IGNORECASE,
+)
 BROWSE_RARITY_CHOICES = [
     app_commands.Choice(name="Common", value="Common"),
     app_commands.Choice(name="Uncommon", value="Uncommon"),
@@ -156,6 +166,34 @@ def parse_classified_id(value: str) -> str | None:
     return f"DWC-{number:05d}"
 
 
+def parse_message_reference(value: str) -> tuple[int, int] | None:
+    """Extract a channel ID and message ID from a Discord message link."""
+    text = value.strip().strip("<>")
+    match = MESSAGE_LINK_RE.search(text) or MESSAGE_ID_PAIR_RE.search(text)
+    if match is None:
+        return None
+    return int(match.group("channel")), int(match.group("message"))
+
+
+def edited_message_content(
+    original: str,
+    find: str,
+    replace: str,
+    *,
+    replace_all: bool = False,
+) -> str | None:
+    """Return safely edited message content, or None when the text is absent."""
+    needle = find.strip()
+    if not needle:
+        raise ValueError("Find text cannot be blank.")
+    if needle not in original:
+        return None
+    edited = original.replace(needle, replace, -1 if replace_all else 1)
+    if len(edited) > DISCORD_MESSAGE_LIMIT:
+        raise ValueError("Edited message would be over Discord's 2,000 character limit.")
+    return edited
+
+
 def _valid_listing_id(value: str) -> bool:
     return parse_listing_id(value) is not None
 
@@ -190,7 +228,8 @@ def classified_display_name(classified: dict[str, Any]) -> str:
 
 def clean_character_name(name: str) -> str:
     """Normalize user-entered character names without changing their spelling."""
-    return re.sub(r"\s+", " ", name).strip()
+    clean = re.sub(r"\s+", " ", name).strip()
+    return CHARACTER_AUTOCOMPLETE_LABEL_RE.sub("", clean).strip()
 
 
 def character_choice_label(character: dict[str, Any]) -> str:
@@ -1480,6 +1519,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             embed,
             "Corrections",
             [
+                "`/dwarfy edit_post` corrects exact text in a Dwarfy bot message without rerolling.",
                 "`/dwarfy void listing:DWF-00001 reason:<why>` voids a shop listing.",
                 "`/dwarfy classified_void classified:DWC-00001 reason:<why>` voids a classified.",
                 "`/dwarfy debt_resolve listing:DWF-00001 reason:<how>` marks debt resolved.",
@@ -3862,6 +3902,137 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ]
             )
         await send_text_response(interaction, "\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="edit_post", description="Admin/mod: correct text in one Dwarfy bot message.")
+    @app_commands.describe(
+        message_link="Discord message link for the Dwarfy Bot post to edit.",
+        find="Exact text to replace. Use a small unique phrase.",
+        replace="Replacement text.",
+        reason="Private audit reason for the correction.",
+        replace_all="Replace every occurrence instead of only the first.",
+    )
+    async def edit_post(
+        self,
+        interaction: discord.Interaction,
+        message_link: str,
+        find: str,
+        replace: str,
+        reason: str | None = None,
+        replace_all: bool = False,
+    ) -> None:
+        if not await self._require_admin(interaction):
+            return
+
+        parsed = parse_message_reference(message_link)
+        if parsed is None:
+            await interaction.response.send_message(
+                "Paste a Discord message link, or a channel ID and message ID.",
+                ephemeral=True,
+            )
+            return
+        channel_id, message_id = parsed
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                await interaction.response.send_message(
+                    "I could not access that channel. Make sure Dwarfy can see it.",
+                    ephemeral=True,
+                )
+                return
+        fetch_message = getattr(channel, "fetch_message", None)
+        if fetch_message is None:
+            await interaction.response.send_message(
+                "That channel type does not support message editing.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            message = await fetch_message(message_id)
+        except discord.NotFound:
+            await interaction.response.send_message("I could not find that message.", ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I cannot read messages in that channel.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(
+                f"Discord would not let me fetch that message: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        if self.bot.user is None or message.author.id != self.bot.user.id:
+            await interaction.response.send_message(
+                "I can only edit messages posted by Dwarfy Bot.",
+                ephemeral=True,
+            )
+            return
+        if not message.content:
+            await interaction.response.send_message(
+                "That Dwarfy message has no plain-text content to edit.",
+                ephemeral=True,
+            )
+            return
+        try:
+            new_content = edited_message_content(
+                message.content,
+                find,
+                replace,
+                replace_all=replace_all,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        if new_content is None:
+            await interaction.response.send_message(
+                "I could not find that exact text in the message. Use a smaller exact phrase.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await message.edit(content=new_content)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I do not have permission to edit that message.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(
+                f"Discord would not let me edit that message: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        audit_reason = (reason or "No reason provided.").strip()
+        await self.bot.db.add_ledger_entry(
+            entry_type="post_edit",
+            listing_id=None,
+            item_name=None,
+            cash_change=0,
+            inventory_cost_change=0,
+            profit_change=0,
+            notes=(
+                f"Edited Dwarfy message {message_id} in channel {channel_id}. "
+                f"Reason: {audit_reason}"
+            ),
+        )
+        await interaction.response.send_message(
+            (
+                "Dwarfy post edited.\n\n"
+                f"Message ID: {message_id}\n"
+                f"Channel ID: {channel_id}\n"
+                f"Reason: {audit_reason}"
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="export", description="Admin/mod: export Dwarfy SQLite tables as CSV files.")
     async def export(self, interaction: discord.Interaction) -> None:

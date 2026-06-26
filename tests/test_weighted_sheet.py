@@ -766,6 +766,25 @@ class DwarfySaleMechanicTests(unittest.TestCase):
 
 
 class DwarfyBuyHagglingTests(unittest.TestCase):
+    def test_uncommon_buy_uses_one_d6_for_base_asking_price(self):
+        cases = [
+            (1, 100),
+            (2, 200),
+            (3, 300),
+            (4, 400),
+            (5, 500),
+            (6, 600),
+        ]
+        for d6_roll, expected_price in cases:
+            with self.subTest(d6_roll=d6_roll), patch(
+                "services.pricing.random.randint",
+                side_effect=[d6_roll, 14],
+            ):
+                result = roll_buy_price("Uncommon", 0)
+
+            self.assertEqual(result.rolled_price, expected_price)
+            self.assertIn(f"1d6 x 100gp = {d6_roll} x 100gp = {expected_price}gp", result.roll_detail)
+
     def test_nat_20_applies_20_percent_discount(self):
         with patch("services.pricing.random.randint", side_effect=[6, 20]):
             result = roll_buy_price("Uncommon", 100)
@@ -1027,6 +1046,42 @@ class MatchingAndDwarfyTests(unittest.TestCase):
             BROWSE_RARITY_VALUES,
             {"Common", "Uncommon", "Rare", "Very Rare", "Legendary"},
         )
+
+    def test_dwarfy_command_count_stays_within_discord_limit(self):
+        import inspect
+
+        import cogs.dwarfy as dwarfy_cog
+
+        command_count = inspect.getsource(dwarfy_cog.Dwarfy).count("@app_commands.command(")
+
+        self.assertLessEqual(command_count, 25)
+
+    def test_edit_post_helpers_parse_links_and_replace_exact_text(self):
+        from cogs.dwarfy import edited_message_content, parse_message_reference
+
+        self.assertEqual(
+            parse_message_reference(
+                "https://discord.com/channels/1433751045334634538/1519728672771412110/1520123456789012345"
+            ),
+            (1519728672771412110, 1520123456789012345),
+        )
+        self.assertEqual(
+            parse_message_reference("1519728672771412110 1520123456789012345"),
+            (1519728672771412110, 1520123456789012345),
+        )
+        original = "Baehotin (13) - active buys Bag of Holding. Baehotin (13) - active pays 160gp."
+
+        edited_once = edited_message_content(original, "Baehotin (13) - active", "Baehotin")
+        edited_all = edited_message_content(
+            original,
+            "Baehotin (13) - active",
+            "Baehotin",
+            replace_all=True,
+        )
+
+        self.assertEqual(edited_once.count("Baehotin (13) - active"), 1)
+        self.assertNotIn("Baehotin (13) - active", edited_all)
+        self.assertIsNone(edited_message_content(original, "Rebecca", "Becca"))
 
     def test_browse_output_shows_all_matching_listings_under_cap(self):
         from cogs.dwarfy import build_browse_output
@@ -1916,7 +1971,7 @@ class CharacterRegistryTests(unittest.TestCase):
         self.assertEqual(len(all_rows), 2)
 
     def test_character_list_output_and_choices_are_clean(self):
-        from cogs.dwarfy import build_character_list_output, character_choice_label
+        from cogs.dwarfy import build_character_list_output, character_choice_label, clean_character_name
 
         rows = [
             {
@@ -1936,6 +1991,8 @@ class CharacterRegistryTests(unittest.TestCase):
         output = build_character_list_output(rows)
 
         self.assertEqual(character_choice_label(rows[0]), "Baehotin (13) - active")
+        self.assertEqual(clean_character_name("Baehotin (13) - active"), "Baehotin")
+        self.assertEqual(clean_character_name("Baehotin (13)"), "Baehotin")
         self.assertIn("Baehotin (13) - active", output)
         self.assertIn("Jimmy Noknees (2) - retired", output)
         self.assertIn("autocomplete", output)
