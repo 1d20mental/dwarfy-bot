@@ -43,6 +43,7 @@ SUPPORTED_LOOT_TYPES = {"Item", "Monster Component"}
 TRUE_TEXT = {"true", "yes", "y", "1"}
 FALSE_TEXT = {"false", "no", "n", "0"}
 BASE_PRICE_COLUMNS = ("Base Price", "Base Cost", "Item Base Price", "Dwarfy Base Price")
+TIER_TEXT_RE = re.compile(r"\b(?:tier\s*)?t\s*([1-4])\b|\btier\s*([1-4])\b|^([1-4])$")
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,43 @@ def parse_optional_int(value: object) -> int | None:
     if not text:
         return None
     return int(float(text))
+
+
+def minimum_tier_from_min_apl(min_apl: int | None) -> int:
+    """Map Min APL bands to the server's minimum item tier."""
+    if min_apl is None:
+        return 1
+    apl = int(min_apl)
+    if apl <= 4:
+        return 1
+    if apl <= 10:
+        return 2
+    if apl <= 16:
+        return 3
+    return 4
+
+
+def tier_number_from_text(value: object) -> int | None:
+    """Parse sheet Tier text such as T1 Permanent or Tier 2."""
+    text = _clean(value).casefold()
+    if not text:
+        return None
+    match = TIER_TEXT_RE.search(text)
+    if not match:
+        return None
+    for group in match.groups():
+        if group:
+            return int(group)
+    return None
+
+
+def item_minimum_tier(item: SheetItem) -> int:
+    """Return the authoritative minimum tier for a sheet item.
+
+    The human-maintained Tier column wins because it represents server policy.
+    Min APL is still used as a backward-compatible fallback for older sheets.
+    """
+    return tier_number_from_text(item.tier) or minimum_tier_from_min_apl(item.min_apl)
 
 
 def parse_base_price(value: object, *, row_number: int, warnings: list[str]) -> int | None:
@@ -326,13 +364,14 @@ def _score_match(query: str, candidate: str) -> float:
     return ratio
 
 
-def _critical_match_key(item: SheetItem) -> tuple[str, str, bool, bool, bool | None]:
+def _critical_match_key(item: SheetItem) -> tuple[str, str, bool, bool, bool | None, int]:
     return (
         item.name.casefold().strip(),
         item.rarity,
         item.consumable,
         item.allowed,
         item.dwarfy_sell_eligible,
+        item_minimum_tier(item),
     )
 
 
@@ -356,6 +395,7 @@ def _sell_match_key(item: SheetItem) -> tuple[object, ...]:
         item.variant_type,
         item.variant_instructions,
         item.variant_options,
+        item_minimum_tier(item),
     )
 
 
@@ -826,11 +866,11 @@ class SheetCache:
             critical_keys = {_sell_match_key(item) for item in candidates}
             conflict_fields = (
                 "Rarity, Source, item detail, Consumable, Allowed, "
-                "Dwarfy Sell Eligible, or variant data"
+                "Dwarfy Sell Eligible, variant data, or Tier"
             )
         else:
             critical_keys = {_critical_match_key(item) for item in candidates}
-            conflict_fields = "Rarity, Consumable, Allowed, and Dwarfy Sell Eligible"
+            conflict_fields = "Rarity, Consumable, Allowed, Dwarfy Sell Eligible, and Tier"
 
         if len(critical_keys) > 1:
             display_name = exact_matches[0].name
@@ -854,8 +894,6 @@ class SheetCache:
         best_by_name: dict[str, tuple[float, SheetItem]] = {}
         for item in self.items:
             if for_sell:
-                if item.consumable:
-                    continue
                 if not self.item_has_dwarfy_pricing(item):
                     continue
             score = _score_match(query, item.name)

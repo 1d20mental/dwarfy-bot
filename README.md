@@ -212,7 +212,7 @@ Rules:
 - `Tags` are comma-separated and case-insensitive.
 - Blank `Min APL` means no minimum.
 - Blank `Max APL` means no maximum.
-- Dwarfy uses `Min APL` to display a server-rule minimum tier on browse, inspect, sell, broker, buy, and classifieds output. Blank or `1-4` means `Tier 1 (Level 1+)`; `5-10` means `Tier 2 (Level 5+)`; `11-16` means `Tier 3 (Level 11+)`; `17-20` means `Tier 4 (Level 17+)`.
+- Dwarfy uses the human-maintained `Tier` column to display server-rule minimum tier on browse, inspect, sell, broker, buy, and classifieds output. Values such as `T1 Permanent` or `Tier 2` are supported. If `Tier` is blank, Dwarfy falls back to `Min APL`: blank or `1-4` means `Tier 1 (Level 1+)`; `5-10` means `Tier 2 (Level 5+)`; `11-16` means `Tier 3 (Level 11+)`; `17-20` means `Tier 4 (Level 17+)`.
 - Rarity values are normalized, so `very rare`, `Very rare`, and `Very Rare` all become `Very Rare`.
 - `Dwarfy Sell Eligible=FALSE` blocks `/dwarfy sell` and `/dwarfy broker` for that row.
 - `Variant Type` describes generic/template rows, such as `Generic Weapon`, `Generic Armor`, `Generic Shield`, `Generic Ammunition`, `Generic Item`, or `Specific Item`.

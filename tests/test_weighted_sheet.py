@@ -1378,7 +1378,14 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertNotIn("Showing 10 of 37", output)
 
     def test_minimum_tier_helpers_map_apl_bands(self):
-        from cogs.dwarfy import minimum_tier_for_min_apl, minimum_tier_text, tier_warning_text
+        from cogs.dwarfy import (
+            enrich_record_tier_from_cache,
+            minimum_tier_for_min_apl,
+            minimum_tier_text,
+            sheet_item_minimum_tier_text,
+            tier_warning_text,
+        )
+        from services.sheets import item_minimum_tier, tier_number_from_text
 
         self.assertEqual(minimum_tier_for_min_apl(None), 1)
         self.assertEqual(minimum_tier_for_min_apl(4), 1)
@@ -1386,6 +1393,13 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertEqual(minimum_tier_for_min_apl(11), 3)
         self.assertEqual(minimum_tier_for_min_apl(17), 4)
         self.assertEqual(minimum_tier_text(min_apl=5), "Tier 2 (Level 5+)")
+        self.assertEqual(tier_number_from_text("T1 Permanent"), 1)
+        self.assertEqual(tier_number_from_text("Tier 2"), 2)
+        self.assertEqual(item_minimum_tier(item("Ring of Swimming", tier="T1 Permanent", min_apl=5)), 1)
+        self.assertEqual(
+            sheet_item_minimum_tier_text(item("Ring of Swimming", tier="T1 Permanent", min_apl=5)),
+            "Tier 1 (Level 1+)",
+        )
         warning = tier_warning_text(
             {"minimum_tier": 2},
             item_name="Spell-Refueling Ring",
@@ -1398,6 +1412,32 @@ class MatchingAndDwarfyTests(unittest.TestCase):
             tier_warning_text({"minimum_tier": 2}, item_name="Ring", character="Rhett (5)", level=5),
             "",
         )
+        cache = make_cache([
+            item("Ring of Swimming", tier="T1 Permanent", min_apl=5, max_apl=10),
+            item("Ring of Swimming", tier="T1 Permanent", min_apl=1, max_apl=4),
+        ])
+        enriched = enrich_record_tier_from_cache(
+            {
+                "item_clean_name": "Ring of Swimming",
+                "item_name": "Ring of Swimming",
+                "minimum_tier": 2,
+                "min_apl": 5,
+                "base_price": 400,
+            },
+            cache,
+        )
+        self.assertEqual(enriched["minimum_tier"], 1)
+
+    def test_duplicate_item_rows_with_conflicting_tiers_are_ambiguous(self):
+        cache = make_cache([
+            item("Tier Conflict", tier="T1 Permanent", min_apl=1),
+            item("Tier Conflict", tier="T2 Permanent", min_apl=5),
+        ])
+
+        match = cache.match_item("Tier Conflict", for_sell=True)
+
+        self.assertIsNone(match.item)
+        self.assertIn("Tier", match.message)
 
     def test_browse_output_and_embed_show_minimum_tier(self):
         from cogs.dwarfy import build_browse_embed, build_browse_output

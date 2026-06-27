@@ -31,6 +31,7 @@ from services.loot import RARITY_ORDER, pick_weighted_item
 from services.sheets import (
     format_item_choices,
     is_generic_template_item,
+    item_minimum_tier,
     item_has_dwarfy_base_cost,
     item_detail_summary,
     looks_like_pasted_detail_text,
@@ -341,7 +342,7 @@ def record_minimum_tier_text(record: dict[str, Any]) -> str:
 
 def sheet_item_minimum_tier_text(sheet_item: Any) -> str:
     """Return the minimum tier text for a SheetItem."""
-    return minimum_tier_text(min_apl=sheet_item.min_apl)
+    return minimum_tier_text(minimum_tier=item_minimum_tier(sheet_item))
 
 
 def record_base_price(record: dict[str, Any]) -> int | None:
@@ -398,15 +399,13 @@ def tier_warning_text(record: dict[str, Any], *, item_name: str, character: str,
 
 
 def enrich_record_tier_from_cache(record: dict[str, Any], cache: Any) -> dict[str, Any]:
-    """Fill missing tier/base-price fields from the live sheet cache when possible.
+    """Fill tier/base-price fields from the live sheet cache when possible.
 
-    This lets older listings created before tier storage still display useful
-    minimum-tier guidance and use the current sheet Base Price.
+    Tier is intentionally refreshed from the sheet because server item tier is
+    policy data. That keeps older listings from displaying stale or Min APL-only
+    tier values after moderators correct the sheet.
     """
-    needs_tier = record.get("minimum_tier") in (None, "")
     needs_base_price = record.get("base_price") in (None, "")
-    if not needs_tier and not needs_base_price:
-        return record
     if not getattr(cache, "loaded", False):
         return record
 
@@ -422,9 +421,8 @@ def enrich_record_tier_from_cache(record: dict[str, Any], cache: Any) -> dict[st
         if match.item is None:
             continue
         enriched = dict(record)
-        if needs_tier:
-            enriched["min_apl"] = match.item.min_apl
-            enriched["minimum_tier"] = minimum_tier_for_min_apl(match.item.min_apl)
+        enriched["min_apl"] = match.item.min_apl
+        enriched["minimum_tier"] = item_minimum_tier(match.item)
         if needs_base_price:
             resolution = resolve_sheet_item_base_price(
                 match.item,
@@ -2264,7 +2262,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             attunement=sheet_item.attunement or None,
             page=sheet_item.page or None,
             min_apl=sheet_item.min_apl,
-            minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
+            minimum_tier=item_minimum_tier(sheet_item),
             base_price=context["base_price"],
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
@@ -2532,7 +2530,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             attunement=sheet_item.attunement or None,
             page=sheet_item.page or None,
             min_apl=sheet_item.min_apl,
-            minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
+            minimum_tier=item_minimum_tier(sheet_item),
             base_price=base_price,
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
@@ -3692,7 +3690,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             attunement=sheet_item.attunement or None,
             page=sheet_item.page or None,
             min_apl=sheet_item.min_apl,
-            minimum_tier=minimum_tier_for_min_apl(sheet_item.min_apl),
+            minimum_tier=item_minimum_tier(sheet_item),
             display_detail=sheet_item.display_detail or None,
             short_description=sheet_item.short_description or None,
             rules_text=sheet_item.rules_text or None,
