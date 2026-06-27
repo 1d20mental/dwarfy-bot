@@ -9,9 +9,16 @@ from discord.ext import commands
 from services.loot import (
     InvalidCreatureTypeError,
     LootError,
+    build_dm_incentive_loot_output,
     build_session_loot_output,
 )
 from utils.formatting import send_text_response
+
+
+SESSIONLOOT_MODE_CHOICES = [
+    app_commands.Choice(name="Player session loot", value="player"),
+    app_commands.Choice(name="DM incentive loot pool", value="dm"),
+]
 
 
 def sessionloot_tag_choices(cache, query: str, *, limit: int = 25) -> list[str]:
@@ -67,18 +74,29 @@ class SessionLoot(commands.Cog):
 
     @app_commands.command(name="sessionloot", description="Roll complete session loot from the Google Sheet.")
     @app_commands.describe(
-        players="Number of players, 1-20.",
-        apl="Average party level, 1-20.",
+        mode="Player session loot or DM incentive loot pool. Defaults to player session.",
+        players="Player mode: number of players, 1-20.",
+        apl="Player mode: average party level. DM mode: DM character level.",
         tag="Optional tag filter, such as undead.",
         creature_type="Optional monster component creature type.",
+        new_hire_players="DM mode: qualifying New Hires players. Each adds one permanent option.",
+        jump_start="DM mode: True if this game qualifies for the Jump Start loot option.",
+        tour_de_tiers="DM mode: True if this completes Tour de Tiers for the month.",
+        extra_options="DM mode: staff-approved extra permanent options, if any.",
     )
+    @app_commands.choices(mode=SESSIONLOOT_MODE_CHOICES)
     async def sessionloot(
         self,
         interaction: discord.Interaction,
-        players: app_commands.Range[int, 1, 20],
-        apl: app_commands.Range[int, 1, 20],
+        mode: str | None = None,
+        players: int | None = None,
+        apl: int | None = None,
         tag: str | None = None,
         creature_type: str | None = None,
+        new_hire_players: int = 0,
+        jump_start: bool = False,
+        tour_de_tiers: bool = False,
+        extra_options: int = 0,
     ) -> None:
         if not await self._require_channel(interaction):
             return
@@ -89,14 +107,32 @@ class SessionLoot(commands.Cog):
             )
             return
 
+        selected_mode = (mode or "player").casefold().strip()
         try:
-            output = build_session_loot_output(
-                cache=self.bot.sheet_cache,
-                players=int(players),
-                apl=int(apl),
-                tag=tag,
-                creature_type=creature_type,
-            )
+            if selected_mode == "dm":
+                if apl is None:
+                    raise LootError("DM incentive mode needs `apl` filled with the DM character level.")
+                output = build_dm_incentive_loot_output(
+                    cache=self.bot.sheet_cache,
+                    apl=int(apl),
+                    tag=tag,
+                    new_hire_players=int(new_hire_players or 0),
+                    jump_start=bool(jump_start),
+                    tour_de_tiers=bool(tour_de_tiers),
+                    extra_options=int(extra_options or 0),
+                )
+            elif selected_mode == "player":
+                if players is None or apl is None:
+                    raise LootError("Player session mode needs both `players` and `apl`.")
+                output = build_session_loot_output(
+                    cache=self.bot.sheet_cache,
+                    players=int(players),
+                    apl=int(apl),
+                    tag=tag,
+                    creature_type=creature_type,
+                )
+            else:
+                raise LootError("Mode must be `Player session loot` or `DM incentive loot pool`.")
         except InvalidCreatureTypeError as exc:
             available = ", ".join(exc.available) or "none loaded"
             await interaction.response.send_message(

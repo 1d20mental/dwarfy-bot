@@ -1495,8 +1495,9 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             embed,
             "Command",
             [
-                "`/sessionloot players:<1-20> apl:<1-20>`",
-                "Optional: `tag` and `creature_type`.",
+                "`/sessionloot mode:Player session loot players:<1-20> apl:<1-20>`",
+                "`/sessionloot mode:DM incentive loot pool apl:<level> new_hire_players:<0-10>`",
+                "Optional: `tag` and `creature_type` for player sessions; `tag` also works for DM pools.",
                 "If the session loot channel is configured, use it there.",
             ],
         )
@@ -1509,6 +1510,16 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
                 "Consumable slots: remaining players.",
                 "Rarity comes from the DMG tier d100 table.",
                 "Final item selection uses the sheet's `Weight` column.",
+            ],
+        )
+        _help_field(
+            embed,
+            "DM Incentive Mode",
+            [
+                "Rolls permanent item options only; the DM chooses one final item.",
+                "New Hires add one option per qualifying new player.",
+                "Jump Start and Tour de Tiers each add one option when they apply.",
+                "The bot does not output XP, GP, or DTP for this mode.",
             ],
         )
         _help_field(
@@ -1747,7 +1758,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             "`/dwarfy ping` checks whether the shop is open.",
             "`/dwarfy help topic:<topic>` shows a focused guide.",
             "`/dwarfy character action:Add or update name:<name> level:<level>` saves character names for autocomplete.",
-            "`/sessionloot players:<count> apl:<level>` rolls public session loot.",
+            "`/sessionloot mode:Player session loot players:<count> apl:<level>` rolls public session loot.",
         ],
     )
     _help_field(

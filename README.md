@@ -310,6 +310,18 @@ If `/sessionloot` rolls a rarity that has no eligible pool for that slot type an
 
 The optional `/sessionloot` `tag` field autocompletes from session-eligible Bot Items tags. The optional `creature_type` field autocompletes from the Monster Components tab.
 
+`/sessionloot` has two modes:
+
+- `Player session loot` is the normal table loot flow. Fill `players` and `apl`; the bot rolls loot priority, permanent slots, and consumable slots.
+- `DM incentive loot pool` is for DM incentive rewards. Fill `apl` with the DM character level and use the trigger fields for qualifying incentives. The bot rolls permanent item options only, and the DM chooses one item from the final option pool. It does not output XP, GP, or DTP.
+
+DM incentive triggers:
+
+- `new_hire_players`: each qualifying New Hires player adds one permanent item option.
+- `jump_start`: adds one permanent item option when the game qualifies.
+- `tour_de_tiers`: adds one permanent item option when this completes the month incentive.
+- `extra_options`: staff-approved extra options, if needed.
+
 Example:
 
 ```text
@@ -374,8 +386,11 @@ If Google Sheets cannot load, the bot still starts when possible. Sheet-dependen
    - You need one of the roles listed in `ADMIN_ROLE_NAMES`.
    - Expected reply includes Bot Items row count, Monster Component row count, and warnings.
 
-3. Run `/sessionloot players:4 apl:3`.
+3. Run `/sessionloot mode:Player session loot players:4 apl:3`.
    - Expected result is a public session loot report.
+
+4. Run `/sessionloot mode:DM incentive loot pool apl:5 new_hire_players:1 jump_start:True`.
+   - Expected result is a public DM incentive loot option pool where the DM chooses one item.
 
 After that, test the shop flow:
 

@@ -12,7 +12,9 @@ from services.loot import (
     LootSlot,
     WeightedSelection,
     _format_item_slot,
+    build_dm_incentive_loot_output,
     build_session_loot_output,
+    dm_incentive_option_count,
     pick_weighted_item,
     select_loot_item,
 )
@@ -561,6 +563,50 @@ class WeightedSelectionTests(unittest.TestCase):
         self.assertIn("Item: **Fallback Permanent**", output)
         self.assertIn("**Consumable 4**", output)
         self.assertNotIn("NO MATCH FOUND", output)
+
+    def test_dm_incentive_option_count_uses_qualifying_triggers(self):
+        count = dm_incentive_option_count(
+            new_hire_players=2,
+            jump_start=True,
+            tour_de_tiers=True,
+            extra_options=1,
+        )
+
+        self.assertEqual(count, 6)
+
+    def test_dm_incentive_loot_rolls_permanent_options_only(self):
+        cache = make_cache([
+            item("Permanent Prize", roll_rarity="Uncommon", consumable=False, min_apl=1, max_apl=20),
+            item("Consumable Prize", roll_rarity="Uncommon", consumable=True, min_apl=1, max_apl=20),
+        ])
+        # Three option rarity rolls, then three weighted-ticket rolls.
+        with patch("services.loot.random.randint", side_effect=[56, 1, 56, 1, 56, 1]):
+            output = build_dm_incentive_loot_output(
+                cache=cache,
+                apl=3,
+                new_hire_players=1,
+                jump_start=True,
+            )
+
+        self.assertIn("**DM Incentive Loot Pool**", output)
+        self.assertIn("**Options:** 3 permanent item options | Choose **one** item.", output)
+        self.assertIn("New Hires: 1 qualifying new player -> +1", output)
+        self.assertIn("Jump Start: yes -> +1", output)
+        self.assertIn("**Option 3**", output)
+        self.assertIn("Item: **Permanent Prize**", output)
+        self.assertNotIn("Consumable Prize", output)
+        self.assertIn("DM incentives only apply to games that last 3+ hours.", output)
+
+    def test_sessionloot_command_exposes_player_and_dm_modes(self):
+        import inspect
+        from cogs.sessionloot import SESSIONLOOT_MODE_CHOICES, SessionLoot
+
+        values = {choice.value for choice in SESSIONLOOT_MODE_CHOICES}
+        source = inspect.getsource(SessionLoot)
+
+        self.assertEqual(values, {"player", "dm"})
+        self.assertIn("new_hire_players", source)
+        self.assertIn("build_dm_incentive_loot_output", source)
 
     def test_staff_review_does_not_attempt_weighted_roll(self):
         cache = make_cache([])

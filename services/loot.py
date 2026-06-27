@@ -35,6 +35,7 @@ RARITY_TABLES = {
 }
 
 RARITY_ORDER = ["Common", "Uncommon", "Rare", "Very Rare", "Legendary"]
+MAX_DM_LOOT_OPTIONS = 20
 
 
 class LootError(Exception):
@@ -554,4 +555,152 @@ def build_session_loot_output(
         lines.extend(["", "\U0001F4CC **Tag Fallback Notes**"])
         lines.extend(fallback_notes)
 
+    return "\n".join(lines)
+
+
+def dm_incentive_option_count(
+    *,
+    new_hire_players: int = 0,
+    jump_start: bool = False,
+    tour_de_tiers: bool = False,
+    extra_options: int = 0,
+) -> int:
+    """Return how many permanent item options a DM should roll.
+
+    DM incentive loot creates a menu of options, but the DM chooses one item from
+    the final list. The base option represents the normal DM loot item.
+    """
+    count = 1
+    count += max(0, int(new_hire_players or 0))
+    count += 1 if jump_start else 0
+    count += 1 if tour_de_tiers else 0
+    count += max(0, int(extra_options or 0))
+    return count
+
+
+def _dm_trigger_lines(
+    *,
+    new_hire_players: int,
+    jump_start: bool,
+    tour_de_tiers: bool,
+    extra_options: int,
+) -> list[str]:
+    lines = [
+        "Base DM loot option: +1",
+        f"New Hires: {new_hire_players} qualifying new player{'s' if new_hire_players != 1 else ''} -> +{new_hire_players}",
+        f"Jump Start: {'yes -> +1' if jump_start else 'no -> +0'}",
+        f"Tour de Tiers: {'yes -> +1' if tour_de_tiers else 'no -> +0'}",
+    ]
+    if extra_options:
+        lines.append(f"Staff-approved extra options: +{extra_options}")
+    return lines
+
+
+def build_dm_incentive_loot_output(
+    *,
+    cache: SheetCache,
+    apl: int,
+    tag: str | None = None,
+    new_hire_players: int = 0,
+    jump_start: bool = False,
+    tour_de_tiers: bool = False,
+    extra_options: int = 0,
+) -> str:
+    """Roll a DM incentive permanent-item option pool.
+
+    This intentionally does not output XP, GP, or DTP; it only handles the extra
+    loot-choice menu created by DM incentives.
+    """
+    if not cache.loaded:
+        raise LootError("Google Sheet data is not loaded.")
+    if not 1 <= apl <= 20:
+        raise LootError("APL/character level must be between 1 and 20.")
+    if not 0 <= int(new_hire_players or 0) <= 10:
+        raise LootError("New Hires qualifying player count must be between 0 and 10.")
+    if not 0 <= int(extra_options or 0) <= 10:
+        raise LootError("Extra options must be between 0 and 10.")
+
+    tag_clean = tag.strip() if tag else None
+    tier, tier_text = tier_for_apl(apl)
+    option_count = dm_incentive_option_count(
+        new_hire_players=int(new_hire_players or 0),
+        jump_start=jump_start,
+        tour_de_tiers=tour_de_tiers,
+        extra_options=int(extra_options or 0),
+    )
+    if option_count > MAX_DM_LOOT_OPTIONS:
+        raise LootError(f"DM incentive loot can roll at most {MAX_DM_LOOT_OPTIONS} options at once.")
+
+    used_permanent_names: set[str] = set()
+    options: list[LootSlot] = []
+    fallback_notes: list[str] = []
+
+    for index in range(1, option_count + 1):
+        d100 = random.randint(1, 100)
+        rarity = rarity_from_roll(tier, d100)
+        result = select_loot_item(
+            cache=cache,
+            rarity=rarity,
+            consumable=False,
+            apl=apl,
+            tag=tag_clean,
+            used_permanent_names=used_permanent_names,
+        )
+        if result.note and result.note not in fallback_notes:
+            fallback_notes.append(result.note)
+        options.append(
+            LootSlot(
+                f"Option {index}",
+                d100,
+                rarity,
+                result.selection,
+                result.note,
+                result.selected_rarity,
+                result.staff_review_reason,
+            )
+        )
+
+    lines = [
+        "\U0001F381 **DM Incentive Loot Pool**",
+        "",
+        f"**DM Character Level/APL:** {apl} | {tier_text}",
+        f"**Options:** {option_count} permanent item option{'s' if option_count != 1 else ''} | Choose **one** item.",
+        f"**Filter:** Tag `{tag_clean or 'none'}`",
+        "",
+        "\U0001F4CB **Qualifying Triggers**",
+    ]
+    lines.extend(
+        _dm_trigger_lines(
+            new_hire_players=int(new_hire_players or 0),
+            jump_start=jump_start,
+            tour_de_tiers=tour_de_tiers,
+            extra_options=int(extra_options or 0),
+        )
+    )
+
+    lines.extend(["", "\U0001F6E1\ufe0f **Permanent Item Options**"])
+    for slot in options:
+        lines.append("")
+        lines.append(
+            _format_item_slot(
+                cache=cache,
+                slot=slot,
+                consumable=False,
+                apl=apl,
+                creature_type=None,
+            )
+        )
+
+    if fallback_notes:
+        lines.extend(["", "\U0001F4CC **Tag Fallback Notes**"])
+        lines.extend(fallback_notes)
+
+    lines.extend(
+        [
+            "",
+            "\U0001F4DD **Reminder**",
+            "Choose one item from this pool and record the chosen item in the session log.",
+            "DM incentives only apply to games that last 3+ hours.",
+        ]
+    )
     return "\n".join(lines)
