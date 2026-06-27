@@ -5,7 +5,7 @@ Dwarfy Bot is a public Python Discord bot for a D&D server. It uses slash comman
 It does two separate jobs:
 
 - `/sessionloot` rolls a complete session loot package from a Google Sheet.
-- `/dwarfy` commands run Dwarfy's magic-item shop, where players sell permanent magic items to the shop and other players buy those items later.
+- `/dwarfy` commands run Dwarfy's magic-item shop, where players sell sheet-priced magic items to the shop and other players buy those items later.
 
 Google Sheets is the master item reference. SQLite is the live shop inventory and ledger.
 
@@ -14,8 +14,8 @@ Google Sheets is the master item reference. SQLite is the live shop inventory an
 - Loads the `Bot Items` and `Monster Components` tabs from one Google Sheet.
 - Caches that sheet data in memory so commands are fast.
 - Creates a SQLite database automatically at `data/dwarfy.sqlite`.
-- Lets players sell permanent magic items directly with `/dwarfy sell`.
-- Lets players broker permanent magic-item sales with `/dwarfy broker`.
+- Lets players sell priced magic items directly with `/dwarfy sell`.
+- Lets players broker priced magic-item sales with `/dwarfy broker`.
 - Lets players browse, inspect, and buy Dwarfy shop listings.
 - Lets players post and buy player-to-player classified listings with Dwarfy withholding a seller-paid broker commission.
 - Lets admins/mods run `/dwarfy stats`, `/dwarfy history`, `/dwarfy export`, `/dwarfy edit_post`, `/dwarfy void`, and `/dwarfy reload`.
@@ -223,7 +223,7 @@ Rules:
 - `JSON Notes`, `Item Tags`, `JSON Source Key`, and `JSON Match Status` are optional reference/audit columns.
 - `Notes` are for human reference.
 
-Only permanent magic items can be sold to Dwarfy with `/dwarfy sell` or `/dwarfy broker`. Consumables are valid for `/sessionloot`, but not for shop sales.
+Any magic item with valid Dwarfy pricing can be sold to Dwarfy with `/dwarfy sell` or `/dwarfy broker`, including consumables when the sheet allows them. Rows with blank/unresolved `Base Price`, `Allowed=FALSE`, or `Dwarfy Sell Eligible=FALSE` will not autocomplete for direct sale or brokered sale.
 
 Generic/template items stay as one row. For example, `+1 Weapon` should stay as `+1 Weapon`; the bot should not generate every possible longsword, rapier, or bow in code. Use `Variant Type` and `Variant Instructions` to tell the DM/player how to resolve it.
 
@@ -258,7 +258,7 @@ item: Ring of Protection
 
 ## Selling To Dwarfy
 
-Dwarfy has two player-facing ways to turn a permanent magic item into gold.
+Dwarfy has two player-facing ways to turn a priced magic item into gold.
 
 `/dwarfy sell` is a direct sale:
 
@@ -271,6 +271,7 @@ Dwarfy has two player-facing ways to turn a permanent magic item into gold.
 `/dwarfy broker` is a downtime brokered sale:
 
 - Costs `5 DTP` and `25gp` manually.
+- Requires `agree:True` so the player explicitly accepts that cost before the roll.
 - Rolls a flat `1d20`.
 - Can pay better or worse than direct sale.
 - A natural 1 loses the item and it does not enter Dwarfy's inventory.
@@ -380,7 +381,7 @@ After that, test the shop flow:
 
 1. Run `/dwarfy character action:Add or update name:Name level:5`.
 2. In the sell channel, run `/dwarfy sell character:Name level:5 item:Bag of Holding`.
-3. In the sell channel, run `/dwarfy broker character:Name level:5 item:Bag of Holding`.
+3. In the sell channel, run `/dwarfy broker character:Name level:5 agree:True item:Bag of Holding`.
 4. For a generic/template item, run `/dwarfy sell character:Name level:5 item:+1 Weapon variant:Longsword`.
 5. In the shop channel, run `/dwarfy browse`.
 6. Run `/dwarfy inspect listing:DWF-00001`.

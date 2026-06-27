@@ -892,7 +892,7 @@ class SheetCache:
         contains: list[str] = []
 
         for item in self.items:
-            if not item.allowed or item.consumable or item.dwarfy_sell_eligible is False:
+            if not item.allowed or item.dwarfy_sell_eligible is False:
                 continue
             if not self.item_has_dwarfy_pricing(item):
                 continue

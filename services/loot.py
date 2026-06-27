@@ -340,6 +340,20 @@ def _item_detail_lines(*, source: str, tags: str) -> list[str]:
     ]
 
 
+def _component_display_name(creature_type: str, component: str) -> str:
+    """Make generic essence rolls specific enough for public loot output."""
+    component_clean = component.strip()
+    creature_clean = creature_type.strip()
+    if (
+        component_clean
+        and creature_clean
+        and "essence" in component_clean.casefold()
+        and creature_clean.casefold() not in component_clean.casefold()
+    ):
+        return f"{creature_clean} {component_clean}"
+    return component_clean
+
+
 def _format_item_slot(
     *,
     cache: SheetCache,
@@ -377,13 +391,14 @@ def _format_item_slot(
                 f"Reason: {exc}"
             )
         component_roll = component.d100 if component.d100 is not None else "random"
+        component_name = _component_display_name(component.creature_type, component.component)
         lines = [
             f"**{slot.label}**",
             _slot_roll_line(slot),
             "Item: **Monster Component**",
             _weighted_audit_line(slot.selection),
             f"Creature Type: **{component.creature_type}** | Component Roll: `{component_roll}`",
-            f"Component: **{component.component}**",
+            f"Component: **{component_name}**",
             f"Examples: {component.examples or 'none'}",
         ]
         if component.note:

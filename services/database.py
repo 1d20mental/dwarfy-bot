@@ -130,7 +130,9 @@ class DwarfyDatabase:
                 created_at TEXT NOT NULL,
                 sold_at TEXT,
                 voided_at TEXT,
-                void_reason TEXT
+                void_reason TEXT,
+                voided_by_user_id TEXT,
+                voided_by_display_name TEXT
             )
             """
         )
@@ -212,7 +214,9 @@ class DwarfyDatabase:
                 return_notice_sent_at TEXT,
                 sold_at TEXT,
                 voided_at TEXT,
-                void_reason TEXT
+                void_reason TEXT,
+                voided_by_user_id TEXT,
+                voided_by_display_name TEXT
             )
             """
         )
@@ -415,6 +419,8 @@ class DwarfyDatabase:
             "buy_final_item_price": "ALTER TABLE listings ADD COLUMN buy_final_item_price INTEGER",
             "buy_dwarfy_profit": "ALTER TABLE listings ADD COLUMN buy_dwarfy_profit INTEGER",
             "buy_receipt_text": "ALTER TABLE listings ADD COLUMN buy_receipt_text TEXT",
+            "voided_by_user_id": "ALTER TABLE listings ADD COLUMN voided_by_user_id TEXT",
+            "voided_by_display_name": "ALTER TABLE listings ADD COLUMN voided_by_display_name TEXT",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
@@ -428,6 +434,8 @@ class DwarfyDatabase:
             "expires_at": "ALTER TABLE classifieds ADD COLUMN expires_at TEXT",
             "returned_at": "ALTER TABLE classifieds ADD COLUMN returned_at TEXT",
             "return_notice_sent_at": "ALTER TABLE classifieds ADD COLUMN return_notice_sent_at TEXT",
+            "voided_by_user_id": "ALTER TABLE classifieds ADD COLUMN voided_by_user_id TEXT",
+            "voided_by_display_name": "ALTER TABLE classifieds ADD COLUMN voided_by_display_name TEXT",
             "min_apl": "ALTER TABLE classifieds ADD COLUMN min_apl INTEGER",
             "minimum_tier": "ALTER TABLE classifieds ADD COLUMN minimum_tier INTEGER",
         }
@@ -754,7 +762,14 @@ class DwarfyDatabase:
         await self.db.commit()
         return True
 
-    async def void_listing(self, listing_id: str, reason: str) -> dict[str, Any] | None:
+    async def void_listing(
+        self,
+        listing_id: str,
+        reason: str,
+        *,
+        voided_by_user_id: str | None = None,
+        voided_by_display_name: str | None = None,
+    ) -> dict[str, Any] | None:
         """Mark a listing as voided without deleting its audit history."""
         listing = await self.get_listing(listing_id)
         if listing is None or listing["status"] == "voided":
@@ -768,10 +783,21 @@ class DwarfyDatabase:
         await self.db.execute(
             """
             UPDATE listings
-            SET status = 'voided', item_status = 'voided', voided_at = ?, void_reason = ?
+            SET status = 'voided',
+                item_status = 'voided',
+                voided_at = ?,
+                void_reason = ?,
+                voided_by_user_id = ?,
+                voided_by_display_name = ?
             WHERE UPPER(listing_id) = UPPER(?)
             """,
-            (utc_now_text(), reason.strip(), listing_id),
+            (
+                utc_now_text(),
+                reason.strip(),
+                voided_by_user_id,
+                voided_by_display_name,
+                listing_id,
+            ),
         )
         await self.add_ledger_entry(
             entry_type="void",
@@ -780,7 +806,11 @@ class DwarfyDatabase:
             cash_change=0,
             inventory_cost_change=inventory_reversal,
             profit_change=profit_reversal,
-            notes=f"Voided listing that was {previous_status}: {reason.strip()}",
+            notes=(
+                f"Voided listing that was {previous_status}"
+                f"{f' by {voided_by_display_name} ({voided_by_user_id})' if voided_by_display_name else ''}: "
+                f"{reason.strip()}"
+            ),
             commit=False,
         )
         await self.db.commit()
@@ -817,12 +847,14 @@ class DwarfyDatabase:
             SET status = 'voided',
                 item_status = 'voided',
                 voided_at = ?,
-                void_reason = ?
+                void_reason = ?,
+                voided_by_user_id = ?,
+                voided_by_display_name = ?
             WHERE status = 'available'
               AND COALESCE(item_status, 'inventory') = 'inventory'
               AND stock_source = 'owner_stock'
             """,
-            (now, clean_reason),
+            (now, clean_reason, stocked_by_user_id, stocked_by_display_name),
         )
         await self.add_ledger_entry(
             entry_type="owner_stock_clear",
@@ -1058,20 +1090,37 @@ class DwarfyDatabase:
                     OR listings.buyer_display_name LIKE ?
                     OR listings.seller_character_name LIKE ?
                     OR listings.buyer_character_name LIKE ?
+                    OR classifieds.seller_display_name LIKE ?
+                    OR classifieds.buyer_display_name LIKE ?
+                    OR classifieds.seller_character_name LIKE ?
+                    OR classifieds.buyer_character_name LIKE ?
                 )
                 """
             )
-            params.extend([like, like, like, like, like, like, like])
+            params.extend([like, like, like, like, like, like, like, like, like, like, like])
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(max(1, min(int(limit), 50)))
         cursor = await self.db.execute(
             f"""
             SELECT ledger.*,
                    listings.status AS listing_status,
-                   listings.seller_display_name,
-                   listings.buyer_display_name
+                   listings.seller_display_name AS listing_seller_display_name,
+                   listings.seller_character_name AS listing_seller_character_name,
+                   listings.seller_character_level AS listing_seller_character_level,
+                   listings.buyer_display_name AS listing_buyer_display_name,
+                   listings.buyer_character_name AS listing_buyer_character_name,
+                   listings.buyer_character_level AS listing_buyer_character_level,
+                   listings.voided_by_display_name AS listing_voided_by_display_name,
+                   classifieds.seller_display_name AS classified_seller_display_name,
+                   classifieds.seller_character_name AS classified_seller_character_name,
+                   classifieds.seller_character_level AS classified_seller_character_level,
+                   classifieds.buyer_display_name AS classified_buyer_display_name,
+                   classifieds.buyer_character_name AS classified_buyer_character_name,
+                   classifieds.buyer_character_level AS classified_buyer_character_level,
+                   classifieds.voided_by_display_name AS classified_voided_by_display_name
             FROM ledger
             LEFT JOIN listings ON UPPER(ledger.listing_id) = UPPER(listings.listing_id)
+            LEFT JOIN classifieds ON UPPER(ledger.listing_id) = UPPER(classifieds.classified_id)
             {where}
             ORDER BY ledger.id DESC
             LIMIT ?
@@ -1360,17 +1409,28 @@ class DwarfyDatabase:
         )
         await self.db.commit()
 
-    async def void_classified(self, classified_id: str, reason: str) -> dict[str, Any] | None:
+    async def void_classified(
+        self,
+        classified_id: str,
+        reason: str,
+        *,
+        voided_by_user_id: str | None = None,
+        voided_by_display_name: str | None = None,
+    ) -> dict[str, Any] | None:
         classified = await self.get_classified(classified_id)
         if classified is None or classified["status"] == "voided":
             return None
         await self.db.execute(
             """
             UPDATE classifieds
-            SET status = 'voided', voided_at = ?, void_reason = ?
+            SET status = 'voided',
+                voided_at = ?,
+                void_reason = ?,
+                voided_by_user_id = ?,
+                voided_by_display_name = ?
             WHERE UPPER(classified_id) = UPPER(?)
             """,
-            (utc_now_text(), reason.strip(), classified_id),
+            (utc_now_text(), reason.strip(), voided_by_user_id, voided_by_display_name, classified_id),
         )
         await self.add_ledger_entry(
             entry_type="classified_void",
@@ -1379,7 +1439,11 @@ class DwarfyDatabase:
             cash_change=0,
             inventory_cost_change=0,
             profit_change=0,
-            notes=f"Voided classified: {reason.strip()}",
+            notes=(
+                f"Voided classified"
+                f"{f' by {voided_by_display_name} ({voided_by_user_id})' if voided_by_display_name else ''}: "
+                f"{reason.strip()}"
+            ),
             commit=False,
         )
         await self.db.commit()

@@ -1161,8 +1161,6 @@ def sell_validation_error(sheet_item, cache: Any | None = None) -> str | None:
     """Return an ephemeral validation error for /dwarfy sell, or None."""
     if not sheet_item.allowed:
         return f"`{sheet_item.name}` exists in the sheet, but Allowed is FALSE."
-    if sheet_item.consumable:
-        return f"`{sheet_item.name}` is marked Consumable=TRUE. Dwarfy only buys permanent magic items."
     if sheet_item.dwarfy_sell_eligible is False:
         return f"`{sheet_item.name}` is marked Dwarfy Sell Eligible=FALSE and cannot be sold to Dwarfy."
     has_pricing = item_has_dwarfy_base_cost(sheet_item)
@@ -1386,6 +1384,13 @@ def build_classified_embed(classified: dict[str, Any]) -> discord.Embed:
     embed.add_field(name="Seller Receives", value=gp(classified_seller_net(classified)), inline=True)
     embed.add_field(name="Dwarfy Commission", value=gp(classified_commission(classified)), inline=True)
     embed.add_field(name="Escrow Hold", value=classified_hold_text(classified), inline=False)
+    if classified.get("status") == "sold":
+        buyer = mention_user(classified.get("buyer_user_id"), classified.get("buyer_display_name"))
+        buyer_character = character_label(classified.get("buyer_character_name"), classified.get("buyer_character_level"))
+        embed.add_field(name="Buyer", value=f"{buyer} as {buyer_character}", inline=False)
+    if classified.get("status") == "voided":
+        embed.add_field(name="Voided By", value=classified.get("voided_by_display_name") or "unknown", inline=True)
+        embed.add_field(name="Void Reason", value=classified.get("void_reason") or "none recorded", inline=False)
     if classified.get("variant"):
         embed.add_field(name="Variant", value=classified["variant"], inline=True)
     if classified.get("details"):
@@ -1398,6 +1403,11 @@ def build_classified_browse_output(classifieds: list[dict[str, Any]]) -> str:
     """Build copyable classifieds browse text."""
     lines = [f"Dwarfy's Classifieds has {len(classifieds)} open posting{'s' if len(classifieds) != 1 else ''}:", ""]
     for classified in classifieds:
+        seller = mention_user(classified.get("seller_user_id"), classified.get("seller_display_name"))
+        seller_character = character_label(
+            classified.get("seller_character_name"),
+            classified.get("seller_character_level"),
+        )
         lines.extend(
             [
                 f"{classified['classified_id']} - {classified_display_name(classified)} - {classified['rarity']}",
@@ -1407,6 +1417,7 @@ def build_classified_browse_output(classifieds: list[dict[str, Any]]) -> str:
                     f"Seller receives: {gp(classified_seller_net(classified))} | "
                     f"Dwarfy commission: {gp(classified_commission(classified))}"
                 ),
+                f"Seller: {seller} as {seller_character}",
                 classified_hold_text(classified),
                 "",
             ]
@@ -1581,7 +1592,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
 
     if selected == "sell":
         embed.title = "Dwarfy Help - Selling To Dwarfy"
-        embed.description = "Use these in the Dwarfy sell channel. Permanent magic items only."
+        embed.description = "Use these in the Dwarfy sell channel. The sheet controls which priced magic items are sellable."
         _help_field(
             embed,
             "Direct Sale",
@@ -1597,8 +1608,9 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             embed,
             "Brokered Sale",
             [
-                "`/dwarfy broker character:<name> level:<1-20> item:<item>`",
+                "`/dwarfy broker character:<name> level:<1-20> agree:True item:<item>`",
                 "Costs 5 DTP and 25gp manually.",
+                "`agree:True` confirms that cost before Dwarfy rolls.",
                 "Rolls 1d20 for payout.",
                 "Can pay more than direct sale.",
                 "Natural 1 loses the item and creates no buyable inventory.",
@@ -2866,7 +2878,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             lines.append(f"...and {len(audit_lines) - 60} more audit lines.")
         await send_text_response(interaction, "\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="sell", description="Sell a permanent magic item to Dwarfy's Shop.")
+    @app_commands.command(name="sell", description="Sell a magic item to Dwarfy's Shop.")
     @app_commands.describe(
         character="Your character's name.",
         level="Your character's level.",
@@ -2951,6 +2963,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
     @app_commands.describe(
         character="Your character's name.",
         level="Your character's level.",
+        agree="True means you agree to spend 5 DTP and 25gp before Dwarfy rolls.",
         item="The clean magic item name from Bot Items.",
         variant="Optional identity for generic/template items, such as Longsword.",
         details="Optional custom notes, not item rules text.",
@@ -2960,10 +2973,17 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         interaction: discord.Interaction,
         character: str,
         level: app_commands.Range[int, 1, 20],
+        agree: bool,
         item: str,
         variant: str | None = None,
         details: str | None = None,
     ) -> None:
+        if not agree:
+            await interaction.response.send_message(
+                "Broker sale cancelled. Choose `agree:True` only when you are ready to spend 5 DTP and 25gp.",
+                ephemeral=True,
+            )
+            return
         context = await self._resolve_sale_context(
             interaction,
             character=character,
@@ -3341,6 +3361,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             lines.extend(
                 [
                     f"Voided at: {listing['voided_at']}",
+                    f"Voided by: {listing.get('voided_by_display_name') or 'unknown'}",
                     f"Void reason: {listing['void_reason'] or 'No reason recorded.'}",
                 ]
             )
@@ -3964,7 +3985,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         if classified_id is None:
             await interaction.response.send_message("Use a classified ID like `DWC-00017`.", ephemeral=True)
             return
-        row = await self.bot.db.void_classified(classified_id, reason)
+        row = await self.bot.db.void_classified(
+            classified_id,
+            reason,
+            voided_by_user_id=str(interaction.user.id),
+            voided_by_display_name=_display_name(interaction.user),
+        )
         if row is None:
             await interaction.response.send_message(
                 f"I could not find classified posting `{classified_id}` to void.",
@@ -3972,7 +3998,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
         await interaction.response.send_message(
-            f"Dwarfy classified voided: {row['classified_id']} - {classified_display_name(row)}\nReason: {reason}",
+            f"Dwarfy classified voided: {row['classified_id']} - {classified_display_name(row)}\n"
+            f"Voided by: {_display_name(interaction.user)}\n"
+            f"Reason: {reason}",
             ephemeral=True,
         )
 
@@ -4094,6 +4122,24 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         lines = ["Dwarfy ledger history", ""]
         for row in rows:
             listing_text = row.get("listing_id") or "none"
+            seller_display = row.get("listing_seller_display_name") or row.get("classified_seller_display_name")
+            seller_character_name = row.get("listing_seller_character_name") or row.get("classified_seller_character_name")
+            seller_character_level = row.get("listing_seller_character_level") or row.get("classified_seller_character_level")
+            buyer_display = row.get("listing_buyer_display_name") or row.get("classified_buyer_display_name")
+            buyer_character_name = row.get("listing_buyer_character_name") or row.get("classified_buyer_character_name")
+            buyer_character_level = row.get("listing_buyer_character_level") or row.get("classified_buyer_character_level")
+            voided_by = row.get("listing_voided_by_display_name") or row.get("classified_voided_by_display_name")
+            audit_bits: list[str] = []
+            if seller_display:
+                audit_bits.append(
+                    f"Seller: {seller_display} as {character_label(seller_character_name, seller_character_level)}"
+                )
+            if buyer_display:
+                audit_bits.append(
+                    f"Buyer: {buyer_display} as {character_label(buyer_character_name, buyer_character_level)}"
+                )
+            if voided_by:
+                audit_bits.append(f"Voided by: {voided_by}")
             lines.extend(
                 [
                     f"#{row['id']} | {row['created_at']} | {row['entry_type']} | {listing_text}",
@@ -4101,6 +4147,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                         f"Item: {row.get('item_name') or 'none'} | Cash: {gp(int(row['cash_change']))} | "
                         f"Inventory: {gp(int(row['inventory_cost_change']))} | Profit: {gp(int(row['profit_change']))}"
                     ),
+                    f"Parties: {' | '.join(audit_bits) if audit_bits else 'none recorded'}",
                     f"Notes: {row['notes']}",
                     "",
                 ]
@@ -4323,7 +4370,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
 
-        row = await self.bot.db.void_listing(listing_id, reason)
+        row = await self.bot.db.void_listing(
+            listing_id,
+            reason,
+            voided_by_user_id=str(interaction.user.id),
+            voided_by_display_name=_display_name(interaction.user),
+        )
         if row is None:
             await interaction.response.send_message(
                 f"I could not find an active listing `{listing_id}` to void.",
@@ -4343,6 +4395,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         output = (
             f"Dwarfy listing voided: {row['listing_id']}\n"
             f"Item: {row['item_name']}\n"
+            f"Voided by: {_display_name(interaction.user)}\n"
             f"Reason: {row['void_reason']}\n"
             "The record was not deleted."
         )

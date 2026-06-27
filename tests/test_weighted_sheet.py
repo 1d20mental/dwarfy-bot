@@ -619,6 +619,25 @@ class MonsterComponentTests(unittest.TestCase):
 
         self.assertIn("Creature Type: **Beast**", output)
 
+    def test_monster_component_essence_names_creature_type(self):
+        from services.sheets import MonsterComponent
+
+        row = item("Monster Component Parcel", consumable=True, loot_type="Monster Component", creature_type="Beast")
+        selection = WeightedSelection(row, ticket=1, total_weight=1, eligible_entry_count=1)
+        slot = LootSlot("Consumable 1", 74, "Uncommon", selection)
+        cache = make_cache([row], [MonsterComponent("Beast", "01-100", "Essence", "Beast item")])
+
+        with patch("services.sheets.random.randint", return_value=63):
+            output = _format_item_slot(
+                cache=cache,
+                slot=slot,
+                consumable=True,
+                apl=3,
+                creature_type=None,
+            )
+
+        self.assertIn("Component: **Beast Essence**", output)
+
 
 class DwarfySaleMechanicTests(unittest.TestCase):
     def test_direct_sell_pays_40_percent_and_does_not_roll(self):
@@ -959,11 +978,20 @@ class DwarfySaleMechanicTests(unittest.TestCase):
         self.assertIn("Item status: inventory", output)
         self.assertIn("Stored Adventure Log Receipt:", output)
 
-    def test_shared_validation_rejects_consumables_and_missing_base_price(self):
+    def test_shared_validation_allows_priced_consumables_and_rejects_missing_base_price(self):
         from cogs.dwarfy import sell_validation_error
 
-        self.assertIn("Consumable=TRUE", sell_validation_error(item("Potion", consumable=True)))
+        self.assertIsNone(sell_validation_error(item("Potion", consumable=True, base_price=50)))
         self.assertIn("Base Price", sell_validation_error(item("No Price", base_price=None)))
+
+    def test_broker_command_requires_agreement_option(self):
+        import inspect
+        from cogs.dwarfy import Dwarfy
+
+        source = inspect.getsource(Dwarfy)
+
+        self.assertIn("agree: bool", source)
+        self.assertIn("Broker sale cancelled", source)
 
 
 class DwarfyBuyHagglingTests(unittest.TestCase):
@@ -1464,6 +1492,7 @@ class MatchingAndDwarfyTests(unittest.TestCase):
 
         self.assertEqual(cache.autocomplete_sell_item_names("ring"), ["Ring of Protection"])
         self.assertIn("Enspelled Armor", cache.autocomplete_sell_item_names(""))
+        self.assertIn("Potion of Healing", cache.autocomplete_sell_item_names(""))
         self.assertNotIn("No Base Price", cache.autocomplete_sell_item_names(""))
 
     def test_ring_of_protection_sells_as_clean_name_with_enriched_data(self):
@@ -2118,8 +2147,47 @@ class MatchingAndDwarfyTests(unittest.TestCase):
         self.assertEqual(len(before), 2)
         self.assertEqual(summary, {"count": 1, "cost_basis": 160})
         self.assertEqual(owner_after["status"], "voided")
+        self.assertEqual(owner_after["voided_by_display_name"], "Owner")
         self.assertEqual(player_after["status"], "available")
         self.assertEqual([row["item_name"] for row in after], ["Player Bag"])
+
+    def test_listing_void_records_voider_and_history_parties(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    row = await db.create_listing(
+                        item_name="Player Bag",
+                        rarity="Uncommon",
+                        source="DMG 2024",
+                        category="Wondrous item",
+                        tags="storage",
+                        seller_user_id="123",
+                        seller_display_name="Seller",
+                        seller_character_name="Rhett",
+                        seller_character_level=9,
+                        sell_roll=0,
+                        seller_payout=160,
+                    )
+                    voided = await db.void_listing(
+                        row["listing_id"],
+                        "test cleanup",
+                        voided_by_user_id="999",
+                        voided_by_display_name="Moderator",
+                    )
+                    history = await db.history_entries(listing_id=row["listing_id"], entry_type="void")
+                finally:
+                    await db.close()
+                return voided, history
+
+        voided, history = asyncio.run(run_case())
+
+        self.assertEqual(voided["voided_by_display_name"], "Moderator")
+        self.assertEqual(history[0]["listing_seller_display_name"], "Seller")
+        self.assertEqual(history[0]["listing_voided_by_display_name"], "Moderator")
 
     def test_buy_receipt_can_show_owner_stock_origin(self):
         from cogs.dwarfy import build_buy_receipt
@@ -2190,6 +2258,10 @@ class ClassifiedsTests(unittest.TestCase):
             "item_name": "+1 Weapon (Longsword)",
             "listing_display_name": "+1 Weapon (Longsword)",
             "rarity": "Uncommon",
+            "seller_user_id": "123",
+            "seller_display_name": "Seller",
+            "seller_character_name": "Beto Dread",
+            "seller_character_level": 9,
             "asking_price": 160,
             "broker_fee": 32,
             "buyer_total": 160,
@@ -2201,6 +2273,7 @@ class ClassifiedsTests(unittest.TestCase):
         self.assertIn("Dwarfy's Classifieds has 1 open posting", output)
         self.assertIn("DWC-00001 - +1 Weapon (Longsword) - Uncommon", output)
         self.assertIn("Buyer price: 160gp", output)
+        self.assertIn("Seller: <@123> as Beto Dread (9)", output)
         self.assertIn("Seller receives: 128gp", output)
         self.assertIn("Dwarfy commission: 32gp", output)
         self.assertIn("Held by Dwarfy until", output)
@@ -2362,16 +2435,25 @@ class ClassifiedsTests(unittest.TestCase):
                         broker_fee=10,
                         buyer_total=50,
                     )
-                    voided = await db.void_classified(row["classified_id"], "test cleanup")
+                    voided = await db.void_classified(
+                        row["classified_id"],
+                        "test cleanup",
+                        voided_by_user_id="999",
+                        voided_by_display_name="Moderator",
+                    )
                     open_after = await db.list_open_classifieds()
+                    history = await db.history_entries(listing_id=row["classified_id"], entry_type="classified_void")
                 finally:
                     await db.close()
-                return voided, open_after
+                return voided, open_after, history
 
-        voided, open_after = asyncio.run(run_case())
+        voided, open_after, history = asyncio.run(run_case())
 
         self.assertEqual(voided["status"], "voided")
         self.assertEqual(voided["void_reason"], "test cleanup")
+        self.assertEqual(voided["voided_by_display_name"], "Moderator")
+        self.assertEqual(history[0]["classified_seller_display_name"], "Seller")
+        self.assertEqual(history[0]["classified_voided_by_display_name"], "Moderator")
         self.assertEqual(open_after, [])
 
     def test_inspect_embed_uses_polished_card_fields(self):
