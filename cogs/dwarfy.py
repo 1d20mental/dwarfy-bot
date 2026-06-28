@@ -45,6 +45,7 @@ from utils.formatting import (
     mention_user,
     price_range_text,
     send_text_response,
+    split_message,
 )
 
 
@@ -921,6 +922,70 @@ class InspectView(discord.ui.View):
         await interaction.response.send_modal(BuyListingModal(self.cog, self.listing["listing_id"]))
 
 
+class BrokerConfirmView(discord.ui.View):
+    """Private numbered confirmation for irreversible broker sales."""
+
+    def __init__(
+        self,
+        cog: Any,
+        *,
+        owner_id: int,
+        context: dict[str, Any],
+        character: str,
+        level: int,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.context = context
+        self.character = character
+        self.level = level
+        self.completed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("This broker prompt belongs to the person who opened it.", ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="[1] Yes - spend 5 DTP and 25gp", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        if self.completed:
+            await interaction.response.send_message("This broker prompt has already been used.", ephemeral=True)
+            return
+        self.completed = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Broker sale confirmed. Dwarfy is rolling now...",
+            view=self,
+        )
+        await self.cog._complete_broker_sale(
+            interaction,
+            context=self.context,
+            character=self.character,
+            level=self.level,
+        )
+        await interaction.followup.send("Broker sale complete. Public receipt posted.", ephemeral=True)
+
+    @discord.ui.button(label="[2] No - cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        if self.completed:
+            await interaction.response.send_message("This broker prompt has already been used.", ephemeral=True)
+            return
+        self.completed = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Broker sale cancelled. No DTP or gold was spent, and no broker roll was made.",
+            view=self,
+        )
+
+
 def new_stock_batch_id() -> str:
     """Return a compact batch ID for owner-stock operations."""
     return datetime.now(timezone.utc).strftime("STOCK-%Y%m%d-%H%M%S")
@@ -1617,9 +1682,9 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             embed,
             "Brokered Sale",
             [
-                "`/dwarfy broker character:<name> level:<1-20> agree:True item:<item>`",
+                "`/dwarfy broker character:<name> level:<1-20> item:<item>`",
                 "Costs 5 DTP and 25gp manually.",
-                "`agree:True` confirms that cost before Dwarfy rolls.",
+                "After you submit, Dwarfy privately asks `[1] Yes` or `[2] No` before rolling.",
                 "Rolls 1d20 for payout.",
                 "Can pay more than direct sale.",
                 "Natural 1 loses the item and creates no buyable inventory.",
@@ -2968,51 +3033,28 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
         )
         await send_text_response(interaction, output)
 
-    @app_commands.command(name="broker", description="Broker a magic item through Dwarfy's Shop for a rolled payout.")
-    @app_commands.describe(
-        character="Your character's name.",
-        level="Your character's level.",
-        agree="True means you agree to spend 5 DTP and 25gp before Dwarfy rolls.",
-        item="The clean magic item name from Bot Items.",
-        variant="Optional identity for generic/template items, such as Longsword.",
-        details="Optional custom notes, not item rules text.",
-    )
-    async def broker(
+    async def _send_public_broker_output(self, interaction: discord.Interaction, output: str) -> None:
+        """Post broker audit output publicly even when confirmation was private."""
+        if interaction.channel is not None:
+            for chunk in split_message(output):
+                await interaction.channel.send(chunk)
+            return
+        await send_text_response(interaction, output)
+
+    async def _complete_broker_sale(
         self,
         interaction: discord.Interaction,
+        *,
+        context: dict[str, Any],
         character: str,
-        level: app_commands.Range[int, 1, 20],
-        agree: bool,
-        item: str,
-        variant: str | None = None,
-        details: str | None = None,
+        level: int,
     ) -> None:
-        if not agree:
-            await interaction.response.send_message(
-                "Broker sale cancelled. Choose `agree:True` only when you are ready to spend 5 DTP and 25gp.",
-                ephemeral=True,
-            )
-            return
-        context = await self._resolve_sale_context(
-            interaction,
-            character=character,
-            level=int(level),
-            item=item,
-            variant=variant,
-            details=details,
-        )
-        if context is None:
-            return
-
+        """Roll and finalize broker sale after the private confirmation prompt."""
         sheet_item = context["sheet_item"]
         broker_roll = roll_broker_price(context["base_price"])
-        declaration = (
-            f"{context['seller']} declares that {context['seller_character']} owns {context['listing_name']} "
-            "and spends 5 DTP and 25gp to broker it through Dwarfy's Shop."
-        )
 
         if broker_roll.roll == 1:
-            receipt = build_sell_receipt(
+            build_sell_receipt(
                 activity="Failed Broker Magic Item through Dwarfy's Shop",
                 character=character,
                 level=int(level),
@@ -3050,7 +3092,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 disaster_message=random.choice(DISASTER_MESSAGES),
             )
             await self._remember_character(interaction, character, int(level))
-            await send_text_response(interaction, output)
+            await self._send_public_broker_output(interaction, output)
             return
 
         receipt_preview = build_sell_receipt(
@@ -3079,7 +3121,7 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             details=context["details_clean"],
             variant_instructions=sheet_item.variant_instructions,
         )
-        listing, receipt = await self._create_inventory_sale_listing(
+        listing, _receipt = await self._create_inventory_sale_listing(
             interaction,
             context=context,
             character=character,
@@ -3104,7 +3146,55 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             base_cost_detail=context["base_cost_detail"],
             variant_block=context["variant_block"],
         )
-        await send_text_response(interaction, output)
+        await self._send_public_broker_output(interaction, output)
+
+    @app_commands.command(name="broker", description="Broker a magic item through Dwarfy's Shop for a rolled payout.")
+    @app_commands.describe(
+        character="Your character's name.",
+        level="Your character's level.",
+        item="The clean magic item name from Bot Items.",
+        variant="Optional identity for generic/template items, such as Longsword.",
+        details="Optional custom notes, not item rules text.",
+    )
+    async def broker(
+        self,
+        interaction: discord.Interaction,
+        character: str,
+        level: app_commands.Range[int, 1, 20],
+        item: str,
+        variant: str | None = None,
+        details: str | None = None,
+    ) -> None:
+        context = await self._resolve_sale_context(
+            interaction,
+            character=character,
+            level=int(level),
+            item=item,
+            variant=variant,
+            details=details,
+        )
+        if context is None:
+            return
+
+        prompt = (
+            "**Confirm Brokered Sale**\n\n"
+            f"Item: **{context['listing_name']}**\n"
+            f"Character: **{context['seller_character']}**\n"
+            "Cost if you continue: **5 DTP and 25gp**\n"
+            "Dwarfy will roll a flat d20 after confirmation. The sale is final, and a natural 1 loses the item.\n\n"
+            "Choose one:"
+        )
+        await interaction.response.send_message(
+            prompt,
+            view=BrokerConfirmView(
+                self,
+                owner_id=interaction.user.id,
+                context=context,
+                character=character,
+                level=int(level),
+            ),
+            ephemeral=True,
+        )
 
     @sell.autocomplete("character")
     async def sell_character_autocomplete(

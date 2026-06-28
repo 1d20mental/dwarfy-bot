@@ -271,7 +271,8 @@ Dwarfy has two player-facing ways to turn a priced magic item into gold.
 `/dwarfy broker` is a downtime brokered sale:
 
 - Costs `5 DTP` and `25gp` manually.
-- Requires `agree:True` so the player explicitly accepts that cost before the roll.
+- After the command is submitted, Dwarfy sends the player a private numbered prompt.
+- Choose `[1] Yes - spend 5 DTP and 25gp` to roll, or `[2] No - cancel` to stop before any roll or cost.
 - Rolls a flat `1d20`.
 - Can pay better or worse than direct sale.
 - A natural 1 loses the item and it does not enter Dwarfy's inventory.
@@ -396,7 +397,7 @@ After that, test the shop flow:
 
 1. Run `/dwarfy character action:Add or update name:Name level:5`.
 2. In the sell channel, run `/dwarfy sell character:Name level:5 item:Bag of Holding`.
-3. In the sell channel, run `/dwarfy broker character:Name level:5 agree:True item:Bag of Holding`.
+3. In the sell channel, run `/dwarfy broker character:Name level:5 item:Bag of Holding`, then choose `[1] Yes` on the private prompt.
 4. For a generic/template item, run `/dwarfy sell character:Name level:5 item:+1 Weapon variant:Longsword`.
 5. In the shop channel, run `/dwarfy browse`.
 6. Run `/dwarfy inspect listing:DWF-00001`.

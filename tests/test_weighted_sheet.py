@@ -1030,14 +1030,19 @@ class DwarfySaleMechanicTests(unittest.TestCase):
         self.assertIsNone(sell_validation_error(item("Potion", consumable=True, base_price=50)))
         self.assertIn("Base Price", sell_validation_error(item("No Price", base_price=None)))
 
-    def test_broker_command_requires_agreement_option(self):
+    def test_broker_command_uses_private_confirmation_prompt(self):
         import inspect
-        from cogs.dwarfy import Dwarfy
+        from cogs.dwarfy import BrokerConfirmView, Dwarfy
 
-        source = inspect.getsource(Dwarfy)
+        cog_source = inspect.getsource(Dwarfy)
+        view_source = inspect.getsource(BrokerConfirmView)
 
-        self.assertIn("agree: bool", source)
-        self.assertIn("Broker sale cancelled", source)
+        self.assertNotIn("agree: bool", cog_source)
+        self.assertIn("BrokerConfirmView", cog_source)
+        self.assertIn("_complete_broker_sale", cog_source)
+        self.assertIn("[1] Yes - spend 5 DTP and 25gp", view_source)
+        self.assertIn("[2] No - cancel", view_source)
+        self.assertIn("No DTP or gold was spent", view_source)
 
 
 class DwarfyBuyHagglingTests(unittest.TestCase):
