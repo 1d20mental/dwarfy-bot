@@ -7,6 +7,7 @@ import csv
 import io
 import random
 import re
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -964,12 +965,21 @@ class BrokerConfirmView(discord.ui.View):
             content="Broker sale confirmed. Dwarfy is rolling now...",
             view=self,
         )
-        await self.cog._complete_broker_sale(
-            interaction,
-            context=self.context,
-            character=self.character,
-            level=self.level,
-        )
+        try:
+            await self.cog._complete_broker_sale(
+                interaction,
+                context=self.context,
+                character=self.character,
+                level=self.level,
+            )
+        except Exception:
+            traceback.print_exc()
+            await interaction.followup.send(
+                "Dwarfy hit an error after confirmation. Staff should check the bot logs before retrying; "
+                "if a listing was created, use `/dwarfy inspect` or `/dwarfy void` to clean it up.",
+                ephemeral=True,
+            )
+            return
         await interaction.followup.send("Broker sale complete. Public receipt posted.", ephemeral=True)
 
     @discord.ui.button(label="[2] No - cancel", style=discord.ButtonStyle.secondary)
@@ -3035,11 +3045,19 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
     async def _send_public_broker_output(self, interaction: discord.Interaction, output: str) -> None:
         """Post broker audit output publicly even when confirmation was private."""
-        if interaction.channel is not None:
-            for chunk in split_message(output):
-                await interaction.channel.send(chunk)
+        chunks = split_message(output)
+        try:
+            for chunk in chunks:
+                await interaction.followup.send(chunk, ephemeral=False)
             return
-        await send_text_response(interaction, output)
+        except Exception:
+            traceback.print_exc()
+
+        if interaction.channel is None:
+            raise RuntimeError("Could not post broker receipt: interaction channel is unavailable.")
+
+        for chunk in chunks:
+            await interaction.channel.send(chunk)
 
     async def _complete_broker_sale(
         self,

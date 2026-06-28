@@ -1040,6 +1040,7 @@ class DwarfySaleMechanicTests(unittest.TestCase):
         self.assertNotIn("agree: bool", cog_source)
         self.assertIn("BrokerConfirmView", cog_source)
         self.assertIn("_complete_broker_sale", cog_source)
+        self.assertIn("traceback.print_exc", view_source)
         self.assertIn("[1] Yes - spend 5 DTP and 25gp", view_source)
         self.assertIn("[2] No - cancel", view_source)
         self.assertIn("No DTP or gold was spent", view_source)
