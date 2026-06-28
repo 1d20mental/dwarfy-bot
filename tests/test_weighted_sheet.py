@@ -574,7 +574,7 @@ class WeightedSelectionTests(unittest.TestCase):
 
         self.assertEqual(count, 6)
 
-    def test_dm_incentive_loot_rolls_permanent_options_and_one_consumable(self):
+    def test_dm_incentive_loot_rolls_permanent_options_and_one_consumable_option(self):
         cache = make_cache([
             item("Permanent Prize", roll_rarity="Uncommon", consumable=False, min_apl=1, max_apl=20),
             item("Consumable Prize", roll_rarity="Uncommon", consumable=True, min_apl=1, max_apl=20),
@@ -589,15 +589,17 @@ class WeightedSelectionTests(unittest.TestCase):
             )
 
         self.assertIn("**DM Incentive Loot Pool**", output)
-        self.assertIn("**Baseline:** 1 permanent option and 1 consumable reward", output)
+        self.assertIn("**Baseline:** 1 permanent option and 1 consumable option", output)
         self.assertIn("**Permanent Pool:** 3 options | Choose **one** permanent item.", output)
-        self.assertIn("**Consumable Reward:** 1 item", output)
+        self.assertIn("**Consumable Pool:** 1 option", output)
+        self.assertIn("**Final Choice:** Choose **one** item total from the permanent and consumable options.", output)
         self.assertIn("New Hires: 1 qualifying new player -> +1 permanent option", output)
         self.assertIn("Jump Start: yes -> +1 permanent option", output)
         self.assertIn("**Permanent Option 3**", output)
-        self.assertIn("**Consumable Reward 1**", output)
+        self.assertIn("**Consumable Option 1**", output)
         self.assertIn("Item: **Permanent Prize**", output)
         self.assertIn("Item: **Consumable Prize**", output)
+        self.assertIn("Choose one item total from the permanent and consumable options", output)
         self.assertIn("DM incentives only apply to games that last 3+ hours.", output)
 
     def test_sessionloot_command_exposes_player_and_dm_modes(self):
