@@ -1693,9 +1693,10 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             embed,
             "DM Incentive Mode",
             [
-                "Rolls permanent item options only; the DM chooses one final item.",
-                "New Hires add one option per qualifying new player.",
-                "Jump Start and Tour de Tiers each add one option when they apply.",
+                "Always rolls one baseline permanent option and one consumable reward.",
+                "The DM chooses one item from the permanent option pool, then takes the consumable reward.",
+                "New Hires add one extra permanent option per qualifying new player.",
+                "Jump Start and Tour de Tiers each add one extra permanent option when they apply.",
                 "The bot does not output XP, GP, or DTP for this mode.",
             ],
         )

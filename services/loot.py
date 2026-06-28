@@ -567,8 +567,9 @@ def dm_incentive_option_count(
 ) -> int:
     """Return how many permanent item options a DM should roll.
 
-    DM incentive loot creates a menu of options, but the DM chooses one item from
-    the final list. The base option represents the normal DM loot item.
+    DM incentive loot always includes one permanent option and one consumable
+    reward. The incentive triggers add extra permanent options to the menu, but
+    they do not add extra consumables.
     """
     count = 1
     count += max(0, int(new_hire_players or 0))
@@ -576,6 +577,11 @@ def dm_incentive_option_count(
     count += 1 if tour_de_tiers else 0
     count += max(0, int(extra_options or 0))
     return count
+
+
+def dm_incentive_consumable_count() -> int:
+    """DM incentive loot always includes one consumable reward."""
+    return 1
 
 
 def _dm_trigger_lines(
@@ -586,13 +592,13 @@ def _dm_trigger_lines(
     extra_options: int,
 ) -> list[str]:
     lines = [
-        "Base DM loot option: +1",
-        f"New Hires: {new_hire_players} qualifying new player{'s' if new_hire_players != 1 else ''} -> +{new_hire_players}",
-        f"Jump Start: {'yes -> +1' if jump_start else 'no -> +0'}",
-        f"Tour de Tiers: {'yes -> +1' if tour_de_tiers else 'no -> +0'}",
+        "Base DM loot: 1 permanent option and 1 consumable reward",
+        f"New Hires: {new_hire_players} qualifying new player{'s' if new_hire_players != 1 else ''} -> +{new_hire_players} permanent option{'s' if new_hire_players != 1 else ''}",
+        f"Jump Start: {'yes -> +1 permanent option' if jump_start else 'no -> +0'}",
+        f"Tour de Tiers: {'yes -> +1 permanent option' if tour_de_tiers else 'no -> +0'}",
     ]
     if extra_options:
-        lines.append(f"Staff-approved extra options: +{extra_options}")
+        lines.append(f"Staff-approved extra permanent options: +{extra_options}")
     return lines
 
 
@@ -606,10 +612,11 @@ def build_dm_incentive_loot_output(
     tour_de_tiers: bool = False,
     extra_options: int = 0,
 ) -> str:
-    """Roll a DM incentive permanent-item option pool.
+    """Roll a DM incentive loot package.
 
-    This intentionally does not output XP, GP, or DTP; it only handles the extra
-    loot-choice menu created by DM incentives.
+    This intentionally does not output XP, GP, or DTP. It rolls the baseline DM
+    permanent and consumable rewards, then adds extra permanent options from DM
+    incentive triggers.
     """
     if not cache.loaded:
         raise LootError("Google Sheet data is not loaded.")
@@ -622,20 +629,22 @@ def build_dm_incentive_loot_output(
 
     tag_clean = tag.strip() if tag else None
     tier, tier_text = tier_for_apl(apl)
-    option_count = dm_incentive_option_count(
+    permanent_option_count = dm_incentive_option_count(
         new_hire_players=int(new_hire_players or 0),
         jump_start=jump_start,
         tour_de_tiers=tour_de_tiers,
         extra_options=int(extra_options or 0),
     )
-    if option_count > MAX_DM_LOOT_OPTIONS:
+    consumable_count = dm_incentive_consumable_count()
+    if permanent_option_count > MAX_DM_LOOT_OPTIONS:
         raise LootError(f"DM incentive loot can roll at most {MAX_DM_LOOT_OPTIONS} options at once.")
 
     used_permanent_names: set[str] = set()
-    options: list[LootSlot] = []
+    permanent_options: list[LootSlot] = []
+    consumable_rewards: list[LootSlot] = []
     fallback_notes: list[str] = []
 
-    for index in range(1, option_count + 1):
+    for index in range(1, permanent_option_count + 1):
         d100 = random.randint(1, 100)
         rarity = rarity_from_roll(tier, d100)
         result = select_loot_item(
@@ -648,9 +657,34 @@ def build_dm_incentive_loot_output(
         )
         if result.note and result.note not in fallback_notes:
             fallback_notes.append(result.note)
-        options.append(
+        permanent_options.append(
             LootSlot(
-                f"Option {index}",
+                f"Permanent Option {index}",
+                d100,
+                rarity,
+                result.selection,
+                result.note,
+                result.selected_rarity,
+                result.staff_review_reason,
+            )
+        )
+
+    for index in range(1, consumable_count + 1):
+        d100 = random.randint(1, 100)
+        rarity = rarity_from_roll(tier, d100)
+        result = select_loot_item(
+            cache=cache,
+            rarity=rarity,
+            consumable=True,
+            apl=apl,
+            tag=tag_clean,
+            used_permanent_names=used_permanent_names,
+        )
+        if result.note and result.note not in fallback_notes:
+            fallback_notes.append(result.note)
+        consumable_rewards.append(
+            LootSlot(
+                f"Consumable Reward {index}",
                 d100,
                 rarity,
                 result.selection,
@@ -664,7 +698,9 @@ def build_dm_incentive_loot_output(
         "\U0001F381 **DM Incentive Loot Pool**",
         "",
         f"**DM Character Level/APL:** {apl} | {tier_text}",
-        f"**Options:** {option_count} permanent item option{'s' if option_count != 1 else ''} | Choose **one** item.",
+        f"**Baseline:** 1 permanent option and 1 consumable reward",
+        f"**Permanent Pool:** {permanent_option_count} option{'s' if permanent_option_count != 1 else ''} | Choose **one** permanent item.",
+        f"**Consumable Reward:** {consumable_count} item",
         f"**Filter:** Tag `{tag_clean or 'none'}`",
         "",
         "\U0001F4CB **Qualifying Triggers**",
@@ -679,13 +715,26 @@ def build_dm_incentive_loot_output(
     )
 
     lines.extend(["", "\U0001F6E1\ufe0f **Permanent Item Options**"])
-    for slot in options:
+    for slot in permanent_options:
         lines.append("")
         lines.append(
             _format_item_slot(
                 cache=cache,
                 slot=slot,
                 consumable=False,
+                apl=apl,
+                creature_type=None,
+            )
+        )
+
+    lines.extend(["", "\U0001F9EA **Consumable Reward**"])
+    for slot in consumable_rewards:
+        lines.append("")
+        lines.append(
+            _format_item_slot(
+                cache=cache,
+                slot=slot,
+                consumable=True,
                 apl=apl,
                 creature_type=None,
             )
@@ -699,7 +748,7 @@ def build_dm_incentive_loot_output(
         [
             "",
             "\U0001F4DD **Reminder**",
-            "Choose one item from this pool and record the chosen item in the session log.",
+            "Choose one permanent item from the permanent pool, take the consumable reward, and record both in the session log.",
             "DM incentives only apply to games that last 3+ hours.",
         ]
     )

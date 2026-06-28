@@ -79,8 +79,8 @@ class SessionLoot(commands.Cog):
         apl="Player mode: average party level. DM mode: DM character level.",
         tag="Optional tag filter, such as undead.",
         creature_type="Optional monster component creature type.",
-        new_hire_players="DM mode: qualifying New Hires players. Each adds one permanent option.",
-        jump_start="DM mode: True if this game qualifies for the Jump Start loot option.",
+        new_hire_players="DM mode: qualifying New Hires players. Each adds one extra permanent option.",
+        jump_start="DM mode: True if this game qualifies for the Jump Start extra permanent option.",
         tour_de_tiers="DM mode: True if this completes Tour de Tiers for the month.",
         extra_options="DM mode: staff-approved extra permanent options, if any.",
     )

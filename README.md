@@ -314,14 +314,14 @@ The optional `/sessionloot` `tag` field autocompletes from session-eligible Bot 
 `/sessionloot` has two modes:
 
 - `Player session loot` is the normal table loot flow. Fill `players` and `apl`; the bot rolls loot priority, permanent slots, and consumable slots.
-- `DM incentive loot pool` is for DM incentive rewards. Fill `apl` with the DM character level and use the trigger fields for qualifying incentives. The bot rolls permanent item options only, and the DM chooses one item from the final option pool. It does not output XP, GP, or DTP.
+- `DM incentive loot pool` is for DM incentive rewards. Fill `apl` with the DM character level and use the trigger fields for qualifying incentives. The bot always rolls one baseline permanent option and one consumable reward. Incentive triggers add extra permanent options, and the DM chooses one item from the permanent option pool. It does not output XP, GP, or DTP.
 
 DM incentive triggers:
 
-- `new_hire_players`: each qualifying New Hires player adds one permanent item option.
-- `jump_start`: adds one permanent item option when the game qualifies.
-- `tour_de_tiers`: adds one permanent item option when this completes the month incentive.
-- `extra_options`: staff-approved extra options, if needed.
+- `new_hire_players`: each qualifying New Hires player adds one extra permanent item option.
+- `jump_start`: adds one extra permanent item option when the game qualifies.
+- `tour_de_tiers`: adds one extra permanent item option when this completes the month incentive.
+- `extra_options`: staff-approved extra permanent options, if needed.
 
 Example:
 
