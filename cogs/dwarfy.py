@@ -15,6 +15,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from services.database import STANDING_MIN_PRICE_GP as DATABASE_STANDING_MIN_PRICE_GP
+from services.database import STANDING_TIERS
 from services.equipment import (
     BaseCostResolution,
     base_cost_requires_variant,
@@ -72,6 +74,7 @@ BROWSE_RARITY_VALUES = {choice.value for choice in BROWSE_RARITY_CHOICES}
 CHARACTER_ACTION_CHOICES = [
     app_commands.Choice(name="Add or update", value="save"),
     app_commands.Choice(name="List", value="list"),
+    app_commands.Choice(name="Standing", value="standing"),
     app_commands.Choice(name="Set active", value="set_active"),
     app_commands.Choice(name="Retire", value="retire"),
 ]
@@ -82,6 +85,7 @@ HELP_TOPIC_CHOICES = [
     app_commands.Choice(name="Shop Browse / Inspect / Buy", value="shop"),
     app_commands.Choice(name="Sell / Broker", value="sell"),
     app_commands.Choice(name="Classifieds", value="classifieds"),
+    app_commands.Choice(name="Dwarfy Standing", value="standing"),
     app_commands.Choice(name="Owner Stock", value="owner"),
     app_commands.Choice(name="Admin Tools", value="admin"),
     app_commands.Choice(name="Channels & Privacy", value="channels"),
@@ -91,7 +95,8 @@ BROWSE_LISTING_CAP = 100
 BROWSE_PAGE_SIZE = 10
 DEFAULT_RANDOM_PERMANENT_COUNT = 10
 DEFAULT_RANDOM_CONSUMABLE_COUNT = 15
-CLASSIFIED_FEE_PERCENT = 20
+CLASSIFIED_DEFAULT_COMMISSION_BPS = 2000
+STANDING_MIN_PRICE_GP = DATABASE_STANDING_MIN_PRICE_GP
 CLASSIFIED_HOLD_DAYS = 30
 CLASSIFIED_RETURN_CHECK_HOURS = 24
 RARITY_COLORS = {
@@ -1412,9 +1417,22 @@ def build_broker_sale_public_output(
     return "\n".join(lines)
 
 
-def classified_fee_for_price(asking_price: int) -> int:
+def commission_bps_text(commission_bps: int | None) -> str:
+    """Display a basis-point commission as a tidy percentage."""
+    bps = CLASSIFIED_DEFAULT_COMMISSION_BPS if commission_bps is None else int(commission_bps)
+    whole = bps // 100
+    fraction = bps % 100
+    if fraction == 0:
+        return f"{whole}%"
+    return f"{whole}.{str(fraction).rstrip('0')}%"
+
+
+def classified_fee_for_price(
+    asking_price: int,
+    commission_bps: int = CLASSIFIED_DEFAULT_COMMISSION_BPS,
+) -> int:
     """Dwarfy's classifieds commission, withheld from the seller payout."""
-    return (asking_price * CLASSIFIED_FEE_PERCENT) // 100
+    return (int(asking_price) * int(commission_bps)) // 10_000
 
 
 def classified_buyer_price(classified: dict[str, Any]) -> int:
@@ -1427,12 +1445,90 @@ def classified_commission(classified: dict[str, Any]) -> int:
     stored_fee = classified.get("broker_fee")
     if stored_fee is not None:
         return int(stored_fee)
-    return classified_fee_for_price(classified_buyer_price(classified))
+    return classified_fee_for_price(
+        classified_buyer_price(classified),
+        int(classified.get("commission_bps_locked") or CLASSIFIED_DEFAULT_COMMISSION_BPS),
+    )
 
 
 def classified_seller_net(classified: dict[str, Any]) -> int:
     """Return the seller's proceeds after Dwarfy withholds commission."""
     return max(0, classified_buyer_price(classified) - classified_commission(classified))
+
+
+def standing_progress_text(summary: dict[str, Any]) -> str:
+    """Return a compact progress line for Dwarfy Standing."""
+    current = summary["current_tier"]
+    next_tier = summary.get("next_tier")
+    if not next_tier:
+        return f"Top tier reached: {current['display_name']}."
+    return (
+        f"{gp(int(summary['lifetime_commission_gp']))} / {gp(int(next_tier['min_commission_gp']))} "
+        f"toward {next_tier['display_name']}; "
+        f"sales {int(summary['qualified_sales_count'])}/{int(next_tier['min_qualified_sales'])}; "
+        f"unique buyers {int(summary['unique_buyer_count'])}/{int(next_tier['min_unique_buyers'])}."
+    )
+
+
+def build_standing_output(user_label: str, summary: dict[str, Any]) -> str:
+    """Build the private Dwarfy Standing summary."""
+    current = summary["current_tier"]
+    next_tier = summary.get("next_tier")
+    lines = [
+        f"Dwarfy Standing for {user_label}",
+        "",
+        f"Tier: {current['display_name']}",
+        f"Current classifieds commission: {commission_bps_text(current['commission_bps'])}",
+        f"Classified commission generated: {gp(int(summary['lifetime_commission_gp']))}",
+        f"Qualified sales: {int(summary['qualified_sales_count'])}",
+        f"Unique buyers: {int(summary['unique_buyer_count'])}",
+        f"Progress: {standing_progress_text(summary)}",
+    ]
+    if next_tier:
+        lines.append(f"Next tier commission: {commission_bps_text(next_tier['commission_bps'])}")
+    lines.extend(["", f'"{current.get("public_flavor") or "The Ledger remembers."}"', "The Ledger remembers."])
+    return "\n".join(lines)
+
+
+def build_standing_tiers_output(tiers: list[dict[str, Any]]) -> str:
+    """Build the help text for the Dwarfy Standing ladder."""
+    lines = ["Dwarfy Standing Tiers", ""]
+    for tier in tiers:
+        lines.append(
+            f"{tier['display_name']} - {commission_bps_text(tier['commission_bps'])} commission"
+        )
+        lines.append(
+            f"Requires: {gp(int(tier['min_commission_gp']))} commission, "
+            f"{int(tier['min_qualified_sales'])} sale(s), "
+            f"{int(tier['min_unique_buyers'])} unique buyer(s)."
+        )
+        if tier.get("public_flavor"):
+            lines.append(f'"{tier["public_flavor"]}"')
+        lines.append("")
+    lines.append("Only completed classifieds where Dwarfy keeps seller-paid commission increase standing.")
+    return "\n".join(lines).strip()
+
+
+def standing_receipt_lines(result: dict[str, Any] | None) -> list[str]:
+    """Return public receipt lines for a classified standing award."""
+    if not result:
+        return []
+    after = result["after"]
+    current = after["current_tier"]
+    lines = [
+        f"Dwarfy Standing: +{gp(int(result['standing_gain_gp']))}",
+        f"Standing: {current['display_name']} - {standing_progress_text(after)}",
+        f"Current commission on new listings: {commission_bps_text(current['commission_bps'])}",
+    ]
+    if result.get("promoted"):
+        before = result["before"]["current_tier"]
+        lines.append(f"Promotion: {before['display_name']} -> {current['display_name']}")
+    if result.get("eligibility_status") != "eligible":
+        lines.append(f"Standing note: {result.get('reason')}")
+    elif result.get("pair_credit_multiplier") == 0.5:
+        lines.append("Standing note: repeated buyer/seller pair within 30 days; 50% credit applied.")
+    lines.append("The Ledger remembers.")
+    return lines
 
 
 def build_classified_embed(classified: dict[str, Any]) -> discord.Embed:
@@ -1455,7 +1551,14 @@ def build_classified_embed(classified: dict[str, Any]) -> discord.Embed:
     embed.add_field(name="Seller", value=f"{seller} as {seller_character}", inline=False)
     embed.add_field(name="Buyer Price", value=gp(classified_buyer_price(classified)), inline=True)
     embed.add_field(name="Seller Receives", value=gp(classified_seller_net(classified)), inline=True)
-    embed.add_field(name="Dwarfy Commission", value=gp(classified_commission(classified)), inline=True)
+    embed.add_field(
+        name="Dwarfy Commission",
+        value=(
+            f"{gp(classified_commission(classified))} "
+            f"({commission_bps_text(classified.get('commission_bps_locked'))})"
+        ),
+        inline=True,
+    )
     embed.add_field(name="Escrow Hold", value=classified_hold_text(classified), inline=False)
     if classified.get("status") == "sold":
         buyer = mention_user(classified.get("buyer_user_id"), classified.get("buyer_display_name"))
@@ -1488,7 +1591,8 @@ def build_classified_browse_output(classifieds: list[dict[str, Any]]) -> str:
                     f"Buyer price: {gp(classified_buyer_price(classified))} | "
                     f"Minimum Tier: {record_minimum_tier_text(classified)} | "
                     f"Seller receives: {gp(classified_seller_net(classified))} | "
-                    f"Dwarfy commission: {gp(classified_commission(classified))}"
+                    f"Dwarfy commission: {gp(classified_commission(classified))} "
+                    f"({commission_bps_text(classified.get('commission_bps_locked'))})"
                 ),
                 f"Seller: {seller} as {seller_character}",
                 classified_hold_text(classified),
@@ -1720,8 +1824,9 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             [
                 "`/dwarfy classified_post character:<name> level:<1-20> item:<item> price:<gp>`",
                 "The price is what the buyer pays.",
-                f"When it sells, Dwarfy withholds a {CLASSIFIED_FEE_PERCENT}% commission from the seller's payout.",
+                "When it sells, Dwarfy withholds the seller's locked Dwarfy Standing commission.",
                 "The seller receives the buyer price minus Dwarfy's commission.",
+                "Completed classified commissions increase the seller's Dwarfy Standing.",
                 "The item does not enter Dwarfy inventory.",
                 f"Dwarfy holds the item for {CLASSIFIED_HOLD_DAYS} days; the seller cannot use, sell, trade, or withdraw it during that hold.",
             ],
@@ -1744,6 +1849,24 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
                 "Classified postings use `DWC-00001`.",
             ],
         )
+        return embed
+
+    if selected == "standing":
+        embed.title = "Dwarfy Help - Dwarfy Standing"
+        embed.description = "Dwarfy Standing lowers future classified commission for sellers who make Dwarfy money."
+        _help_field(
+            embed,
+            "How It Works",
+            [
+                "Only completed classified sales count.",
+                "Standing gain equals the commission Dwarfy actually keeps from the seller.",
+                "Standing belongs to your Discord user, not one character.",
+                "A classified locks your current commission when posted; old listings do not change if you rank up.",
+                f"Sales below {gp(STANDING_MIN_PRICE_GP)} do not grant standing.",
+                "`/dwarfy character action:Standing` privately shows your progress.",
+            ],
+        )
+        _help_field(embed, "Tier Ladder", build_standing_tiers_output(STANDING_TIERS).splitlines())
         return embed
 
     if selected == "owner":
@@ -1853,6 +1976,7 @@ def build_help_embed(topic: str | None = None) -> discord.Embed:
             "`/dwarfy classified_post` - post a player-to-player sale.",
             "`/dwarfy classified_browse` - privately browse postings.",
             "`/dwarfy classified_buy` - buy by `DWC-` classified ID and get trade-log text.",
+            "`/dwarfy character action:Standing` - check your Dwarfy Standing.",
         ],
     )
     _help_field(
@@ -2097,6 +2221,14 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 include_retired=include_retired,
             )
             await interaction.response.send_message(build_character_list_output(rows), ephemeral=True)
+            return
+
+        if action == "standing":
+            summary = await self.bot.db.get_user_standing(str(interaction.user.id))
+            await interaction.response.send_message(
+                build_standing_output(interaction.user.mention, summary),
+                ephemeral=True,
+            )
             return
 
         raw_character_name = compact_character_name(name or "")
@@ -3779,7 +3911,10 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
 
         sheet_item = context["sheet_item"]
         asking_price = int(price)
-        broker_fee = classified_fee_for_price(asking_price)
+        standing_summary = await self.bot.db.get_user_standing(str(interaction.user.id))
+        standing_tier = standing_summary["current_tier"]
+        commission_bps = int(standing_tier["commission_bps"])
+        broker_fee = classified_fee_for_price(asking_price, commission_bps)
         buyer_total = asking_price
         row = await self.bot.db.create_classified(
             item_name=context["listing_name"],
@@ -3811,6 +3946,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             asking_price=asking_price,
             broker_fee=broker_fee,
             buyer_total=buyer_total,
+            commission_bps_locked=commission_bps,
+            seller_tier_key_at_listing=standing_tier["tier_key"],
+            seller_standing_gp_at_listing=int(standing_summary["lifetime_commission_gp"]),
         )
         await self._remember_character(interaction, character, int(level))
 
@@ -3830,8 +3968,9 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Minimum Tier: {sheet_item_minimum_tier_text(sheet_item)}",
             f"Source: {source_with_page(sheet_item.source, sheet_item.page)}",
             f"Buyer price: {gp(asking_price)}",
-            f"Dwarfy commission: {gp(broker_fee)} ({CLASSIFIED_FEE_PERCENT}%, withheld from seller payout)",
+            f"Dwarfy commission: {gp(broker_fee)} ({commission_bps_text(commission_bps)}, withheld from seller payout)",
             f"Seller receives if sold: {gp(asking_price - broker_fee)}",
+            f"Dwarfy Standing: {standing_tier['display_name']} ({standing_progress_text(standing_summary)})",
             f"Escrow: {classified_hold_text(row)}",
             "Status: Open, held by Dwarfy",
         ]
@@ -4005,6 +4144,12 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
                 ephemeral=True,
             )
             return
+        if str(row.get("seller_user_id")) == str(interaction.user.id):
+            await interaction.response.send_message(
+                "Dwarfy will not let you buy your own classified posting.",
+                ephemeral=True,
+            )
+            return
         buyer = interaction.user.mention
         buyer_character = character_label(character, int(level))
         trade_log = build_classified_trade_log(row, buyer=buyer, buyer_character=buyer_character)
@@ -4029,6 +4174,8 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             )
             return
         await self._remember_character(interaction, character, int(level))
+        standing_result = sold.get("_standing_result") if isinstance(sold, dict) else None
+        standing_lines = standing_receipt_lines(standing_result)
 
         output = (
             f"{buyer} buys {classified_display_name(row)} through Dwarfy's Classifieds.\n\n"
@@ -4040,8 +4187,10 @@ class Dwarfy(commands.GroupCog, name="dwarfy"):
             f"Minimum Tier: {record_minimum_tier_text(row)}\n"
             f"Source: {source_with_page(row.get('source'), row.get('page'))}\n"
             f"Buyer price: {gp(classified_buyer_price(row))}\n"
-            f"Dwarfy commission: {gp(classified_commission(row))} (withheld from seller payout)\n"
+            f"Dwarfy commission: {gp(classified_commission(row))} "
+            f"({commission_bps_text(row.get('commission_bps_locked'))}, withheld from seller payout)\n"
             f"Seller receives: {gp(classified_seller_net(row))}\n"
+            f"{chr(10).join(standing_lines) + chr(10) if standing_lines else ''}"
             "Status: Final once both players update their logs.\n\n"
             "Copyable Trade Log:\n"
             f"{trade_log}"

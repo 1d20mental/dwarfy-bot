@@ -8,6 +8,71 @@ from typing import Any
 
 import aiosqlite
 
+STANDING_MIN_PRICE_GP = 500
+STANDING_PAIR_WINDOW_DAYS = 30
+STANDING_TIERS = [
+    {
+        "tier_key": "counter_stranger",
+        "display_name": "Counter Stranger",
+        "min_commission_gp": 0,
+        "min_qualified_sales": 0,
+        "min_unique_buyers": 0,
+        "commission_bps": 2000,
+        "sort_order": 0,
+        "public_flavor": "Dwarfy knows your face. Maybe.",
+    },
+    {
+        "tier_key": "copper_regular",
+        "display_name": "Copper Regular",
+        "min_commission_gp": 2500,
+        "min_qualified_sales": 3,
+        "min_unique_buyers": 2,
+        "commission_bps": 1750,
+        "sort_order": 1,
+        "public_flavor": "You have appeared in the books without causing a fire.",
+    },
+    {
+        "tier_key": "silver_ledgerhand",
+        "display_name": "Silver Ledgerhand",
+        "min_commission_gp": 10000,
+        "min_qualified_sales": 8,
+        "min_unique_buyers": 4,
+        "commission_bps": 1500,
+        "sort_order": 2,
+        "public_flavor": "Dwarfy trusts your coin to clink correctly.",
+    },
+    {
+        "tier_key": "gold_broker",
+        "display_name": "Gold Broker",
+        "min_commission_gp": 25000,
+        "min_qualified_sales": 15,
+        "min_unique_buyers": 7,
+        "commission_bps": 1250,
+        "sort_order": 3,
+        "public_flavor": "Your name has a warm little drawer in the vault.",
+    },
+    {
+        "tier_key": "mithral_partner",
+        "display_name": "Mithral Partner",
+        "min_commission_gp": 60000,
+        "min_qualified_sales": 30,
+        "min_unique_buyers": 12,
+        "commission_bps": 1000,
+        "sort_order": 4,
+        "public_flavor": "Dwarfy says you are not a customer. You are overhead.",
+    },
+    {
+        "tier_key": "vault_partner",
+        "display_name": "Vault Partner",
+        "min_commission_gp": 125000,
+        "min_qualified_sales": 50,
+        "min_unique_buyers": 20,
+        "commission_bps": 500,
+        "sort_order": 5,
+        "public_flavor": "The Ledger remembers, and now it nods first.",
+    },
+]
+
 
 def utc_now_text() -> str:
     """Store timestamps in one predictable UTC format."""
@@ -202,6 +267,9 @@ class DwarfyDatabase:
                 asking_price INTEGER NOT NULL,
                 broker_fee INTEGER NOT NULL,
                 buyer_total INTEGER NOT NULL,
+                commission_bps_locked INTEGER,
+                seller_tier_key_at_listing TEXT,
+                seller_standing_gp_at_listing INTEGER,
                 status TEXT NOT NULL CHECK (status IN ('open', 'sold', 'voided')),
                 buyer_user_id TEXT,
                 buyer_display_name TEXT,
@@ -220,8 +288,85 @@ class DwarfyDatabase:
             )
             """
         )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dwarfy_standing_tiers (
+                tier_id INTEGER PRIMARY KEY,
+                tier_key TEXT UNIQUE NOT NULL,
+                display_name TEXT NOT NULL,
+                min_commission_gp INTEGER NOT NULL DEFAULT 0,
+                min_qualified_sales INTEGER NOT NULL DEFAULT 0,
+                min_unique_buyers INTEGER NOT NULL DEFAULT 0,
+                commission_bps INTEGER NOT NULL,
+                sort_order INTEGER NOT NULL,
+                public_flavor TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dwarfy_standing_users (
+                discord_user_id TEXT PRIMARY KEY,
+                lifetime_commission_gp INTEGER NOT NULL DEFAULT 0,
+                qualified_sales_count INTEGER NOT NULL DEFAULT 0,
+                unique_buyer_count INTEGER NOT NULL DEFAULT 0,
+                current_tier_key TEXT NOT NULL DEFAULT 'counter_stranger',
+                fraud_flag_count INTEGER NOT NULL DEFAULT 0,
+                last_qualified_sale_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dwarfy_standing_ledger (
+                standing_ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_user_id TEXT NOT NULL,
+                character_name TEXT,
+                classified_listing_id TEXT,
+                item_name TEXT,
+                event_type TEXT NOT NULL,
+                amount_gp INTEGER NOT NULL,
+                eligible INTEGER NOT NULL DEFAULT 1,
+                eligibility_status TEXT NOT NULL DEFAULT 'eligible',
+                reason TEXT,
+                buyer_user_id TEXT,
+                buyer_character_name TEXT,
+                pair_credit_multiplier REAL NOT NULL DEFAULT 1.0,
+                commission_gp_original INTEGER,
+                commission_gp_awarded INTEGER,
+                created_by_discord_user_id TEXT,
+                created_at TEXT NOT NULL,
+                reverses_standing_ledger_id INTEGER
+            )
+            """
+        )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dwarfy_standing_flags (
+                flag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                classified_listing_id TEXT,
+                standing_ledger_id INTEGER,
+                seller_user_id TEXT,
+                buyer_user_id TEXT,
+                flag_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                details_json TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolved_by_discord_user_id TEXT,
+                resolution_notes TEXT
+            )
+            """
+        )
         await self._migrate_listings_table()
         await self._migrate_classifieds_table()
+        await self._seed_standing_tiers()
         await self.db.commit()
 
     async def _ensure_default_character(self, user_id: str) -> None:
@@ -438,10 +583,35 @@ class DwarfyDatabase:
             "voided_by_display_name": "ALTER TABLE classifieds ADD COLUMN voided_by_display_name TEXT",
             "min_apl": "ALTER TABLE classifieds ADD COLUMN min_apl INTEGER",
             "minimum_tier": "ALTER TABLE classifieds ADD COLUMN minimum_tier INTEGER",
+            "commission_bps_locked": "ALTER TABLE classifieds ADD COLUMN commission_bps_locked INTEGER",
+            "seller_tier_key_at_listing": "ALTER TABLE classifieds ADD COLUMN seller_tier_key_at_listing TEXT",
+            "seller_standing_gp_at_listing": "ALTER TABLE classifieds ADD COLUMN seller_standing_gp_at_listing INTEGER",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
                 await self.db.execute(statement)
+
+        await self.db.execute(
+            """
+            UPDATE classifieds
+            SET commission_bps_locked = 2000
+            WHERE commission_bps_locked IS NULL
+            """
+        )
+        await self.db.execute(
+            """
+            UPDATE classifieds
+            SET seller_tier_key_at_listing = 'counter_stranger'
+            WHERE seller_tier_key_at_listing IS NULL
+            """
+        )
+        await self.db.execute(
+            """
+            UPDATE classifieds
+            SET seller_standing_gp_at_listing = 0
+            WHERE seller_standing_gp_at_listing IS NULL
+            """
+        )
 
         cursor = await self.db.execute(
             """
@@ -457,6 +627,315 @@ class DwarfyDatabase:
                 "UPDATE classifieds SET expires_at = ? WHERE id = ?",
                 (expires_at, row["id"]),
             )
+
+    async def _seed_standing_tiers(self) -> None:
+        """Install the default Dwarfy Standing ladder without overwriting edits."""
+        now = utc_now_text()
+        for tier in STANDING_TIERS:
+            await self.db.execute(
+                """
+                INSERT OR IGNORE INTO dwarfy_standing_tiers (
+                    tier_key, display_name, min_commission_gp,
+                    min_qualified_sales, min_unique_buyers, commission_bps,
+                    sort_order, public_flavor, active, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    tier["tier_key"],
+                    tier["display_name"],
+                    tier["min_commission_gp"],
+                    tier["min_qualified_sales"],
+                    tier["min_unique_buyers"],
+                    tier["commission_bps"],
+                    tier["sort_order"],
+                    tier["public_flavor"],
+                    now,
+                    now,
+                ),
+            )
+
+    async def standing_tiers(self) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            """
+            SELECT * FROM dwarfy_standing_tiers
+            WHERE active = 1
+            ORDER BY sort_order ASC, tier_id ASC
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def _standing_tier_by_key(self, tier_key: str | None) -> dict[str, Any]:
+        key = tier_key or "counter_stranger"
+        cursor = await self.db.execute(
+            "SELECT * FROM dwarfy_standing_tiers WHERE tier_key = ? AND active = 1",
+            (key,),
+        )
+        row = await cursor.fetchone()
+        if row:
+            return dict(row)
+        tiers = await self.standing_tiers()
+        return tiers[0]
+
+    async def determine_standing_tier(
+        self,
+        *,
+        lifetime_commission_gp: int,
+        qualified_sales_count: int,
+        unique_buyer_count: int,
+    ) -> dict[str, Any]:
+        """Return the best active tier that the summary satisfies."""
+        best: dict[str, Any] | None = None
+        for tier in await self.standing_tiers():
+            if (
+                int(lifetime_commission_gp) >= int(tier["min_commission_gp"])
+                and int(qualified_sales_count) >= int(tier["min_qualified_sales"])
+                and int(unique_buyer_count) >= int(tier["min_unique_buyers"])
+            ):
+                best = tier
+        if best is not None:
+            return best
+        tiers = await self.standing_tiers()
+        return tiers[0]
+
+    async def recalc_user_standing(self, discord_user_id: str) -> dict[str, Any]:
+        """Rebuild one user's cached Dwarfy Standing from the immutable ledger."""
+        now = utc_now_text()
+        cursor = await self.db.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN eligible = 1 THEN amount_gp ELSE 0 END), 0) AS lifetime_commission_gp,
+                COALESCE(SUM(CASE WHEN eligible = 1 AND amount_gp > 0 THEN 1 ELSE 0 END), 0) AS qualified_sales_count,
+                COUNT(DISTINCT CASE WHEN eligible = 1 AND amount_gp > 0 THEN buyer_user_id ELSE NULL END) AS unique_buyer_count,
+                MAX(CASE WHEN eligible = 1 AND amount_gp > 0 THEN created_at ELSE NULL END) AS last_qualified_sale_at
+            FROM dwarfy_standing_ledger
+            WHERE discord_user_id = ?
+            """,
+            (discord_user_id,),
+        )
+        row = dict(await cursor.fetchone())
+        tier = await self.determine_standing_tier(
+            lifetime_commission_gp=int(row["lifetime_commission_gp"] or 0),
+            qualified_sales_count=int(row["qualified_sales_count"] or 0),
+            unique_buyer_count=int(row["unique_buyer_count"] or 0),
+        )
+        await self.db.execute(
+            """
+            INSERT INTO dwarfy_standing_users (
+                discord_user_id, lifetime_commission_gp, qualified_sales_count,
+                unique_buyer_count, current_tier_key, fraud_flag_count,
+                last_qualified_sale_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+            ON CONFLICT(discord_user_id) DO UPDATE SET
+                lifetime_commission_gp = excluded.lifetime_commission_gp,
+                qualified_sales_count = excluded.qualified_sales_count,
+                unique_buyer_count = excluded.unique_buyer_count,
+                current_tier_key = excluded.current_tier_key,
+                last_qualified_sale_at = excluded.last_qualified_sale_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                discord_user_id,
+                int(row["lifetime_commission_gp"] or 0),
+                int(row["qualified_sales_count"] or 0),
+                int(row["unique_buyer_count"] or 0),
+                tier["tier_key"],
+                row["last_qualified_sale_at"],
+                now,
+                now,
+            ),
+        )
+        return await self.get_user_standing(discord_user_id)
+
+    async def get_user_standing(self, discord_user_id: str) -> dict[str, Any]:
+        """Return a user's cached standing summary, creating it if needed."""
+        cursor = await self.db.execute(
+            "SELECT * FROM dwarfy_standing_users WHERE discord_user_id = ?",
+            (discord_user_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return await self.recalc_user_standing(discord_user_id)
+
+        summary = dict(row)
+        current_tier = await self._standing_tier_by_key(summary.get("current_tier_key"))
+        tiers = await self.standing_tiers()
+        next_tier = None
+        for tier in tiers:
+            if int(tier["sort_order"]) > int(current_tier["sort_order"]):
+                next_tier = tier
+                break
+        summary["current_tier"] = current_tier
+        summary["next_tier"] = next_tier
+        return summary
+
+    async def current_standing_commission_bps(self, discord_user_id: str) -> int:
+        summary = await self.get_user_standing(discord_user_id)
+        return int(summary["current_tier"]["commission_bps"])
+
+    async def _standing_pair_sale_count(
+        self,
+        seller_user_id: str,
+        buyer_user_id: str,
+        *,
+        now_text: str,
+    ) -> int:
+        window_start = (
+            _parse_utc_text(now_text) - timedelta(days=STANDING_PAIR_WINDOW_DAYS)
+        ).isoformat(timespec="seconds")
+        cursor = await self.db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM dwarfy_standing_ledger
+            WHERE event_type = 'classified_commission'
+              AND amount_gp > 0
+              AND created_at >= ?
+              AND (
+                    (discord_user_id = ? AND buyer_user_id = ?)
+                    OR (discord_user_id = ? AND buyer_user_id = ?)
+                  )
+            """,
+            (window_start, seller_user_id, buyer_user_id, buyer_user_id, seller_user_id),
+        )
+        row = await cursor.fetchone()
+        return int(row["count"] or 0)
+
+    async def _create_standing_flag(
+        self,
+        *,
+        classified_listing_id: str,
+        standing_ledger_id: int | None,
+        seller_user_id: str,
+        buyer_user_id: str,
+        flag_type: str,
+        severity: str,
+        details: str,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO dwarfy_standing_flags (
+                classified_listing_id, standing_ledger_id, seller_user_id,
+                buyer_user_id, flag_type, severity, details_json, status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)
+            """,
+            (
+                classified_listing_id,
+                standing_ledger_id,
+                seller_user_id,
+                buyer_user_id,
+                flag_type,
+                severity,
+                details,
+                utc_now_text(),
+            ),
+        )
+
+    async def award_classified_standing(
+        self,
+        classified: dict[str, Any],
+        *,
+        buyer_user_id: str,
+        buyer_character_name: str,
+    ) -> dict[str, Any]:
+        """Award seller Dwarfy Standing for a completed classified sale."""
+        seller_user_id = str(classified["seller_user_id"])
+        commission_gp = int(classified.get("broker_fee") or 0)
+        asking_price = int(classified.get("asking_price") or 0)
+        now = utc_now_text()
+        before = await self.get_user_standing(seller_user_id)
+
+        eligible = True
+        status = "eligible"
+        reason = "Classified commission generated for Dwarfy."
+        multiplier = 1.0
+        flag: dict[str, Any] | None = None
+
+        if seller_user_id == str(buyer_user_id):
+            eligible = False
+            status = "same_user"
+            reason = "Buyer and seller are the same Discord user."
+        elif asking_price < STANDING_MIN_PRICE_GP:
+            eligible = False
+            status = "below_minimum_price"
+            reason = f"Sale below standing minimum of {STANDING_MIN_PRICE_GP}gp."
+        elif commission_gp <= 0:
+            eligible = False
+            status = "no_commission"
+            reason = "Dwarfy kept no commission from this sale."
+        else:
+            pair_count = await self._standing_pair_sale_count(
+                seller_user_id,
+                str(buyer_user_id),
+                now_text=now,
+            )
+            if pair_count == 1:
+                multiplier = 0.5
+                status = "reduced_by_pair_limit"
+                reason = f"Second sale between this buyer/seller pair within {STANDING_PAIR_WINDOW_DAYS} days."
+            elif pair_count >= 2:
+                multiplier = 0.0
+                eligible = False
+                status = "same_pair_limit"
+                reason = f"Third or later sale between this buyer/seller pair within {STANDING_PAIR_WINDOW_DAYS} days."
+                flag = {
+                    "flag_type": "same_pair_repeat",
+                    "severity": "medium",
+                    "details": reason,
+                }
+
+        awarded = int(commission_gp * multiplier) if eligible else 0
+        cursor = await self.db.execute(
+            """
+            INSERT INTO dwarfy_standing_ledger (
+                discord_user_id, character_name, classified_listing_id, item_name,
+                event_type, amount_gp, eligible, eligibility_status, reason,
+                buyer_user_id, buyer_character_name, pair_credit_multiplier,
+                commission_gp_original, commission_gp_awarded, created_at
+            )
+            VALUES (?, ?, ?, ?, 'classified_commission', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                seller_user_id,
+                classified.get("seller_character_name"),
+                classified.get("classified_id"),
+                classified.get("item_name"),
+                awarded,
+                1 if eligible and awarded > 0 else 0,
+                status,
+                reason,
+                str(buyer_user_id),
+                buyer_character_name,
+                multiplier,
+                commission_gp,
+                awarded,
+                now,
+            ),
+        )
+        ledger_id = int(cursor.lastrowid)
+        if flag:
+            await self._create_standing_flag(
+                classified_listing_id=str(classified.get("classified_id")),
+                standing_ledger_id=ledger_id,
+                seller_user_id=seller_user_id,
+                buyer_user_id=str(buyer_user_id),
+                flag_type=flag["flag_type"],
+                severity=flag["severity"],
+                details=flag["details"],
+            )
+        after = await self.recalc_user_standing(seller_user_id)
+        return {
+            "standing_ledger_id": ledger_id,
+            "standing_gain_gp": awarded,
+            "commission_gp_original": commission_gp,
+            "eligibility_status": status,
+            "reason": reason,
+            "pair_credit_multiplier": multiplier,
+            "before": before,
+            "after": after,
+            "promoted": before["current_tier"]["tier_key"] != after["current_tier"]["tier_key"],
+        }
 
     async def create_listing(
         self,
@@ -1152,6 +1631,9 @@ class DwarfyDatabase:
         asking_price: int,
         broker_fee: int,
         buyer_total: int,
+        commission_bps_locked: int = 2000,
+        seller_tier_key_at_listing: str = "counter_stranger",
+        seller_standing_gp_at_listing: int = 0,
         listing_display_name: str | None = None,
         base_item_name: str | None = None,
         variant: str | None = None,
@@ -1181,9 +1663,10 @@ class DwarfyDatabase:
                 min_apl, minimum_tier, display_detail, short_description, rules_text, json_notes, item_tags,
                 seller_user_id, seller_display_name, seller_character_name,
                 seller_character_level, asking_price, broker_fee, buyer_total,
+                commission_bps_locked, seller_tier_key_at_listing, seller_standing_gp_at_listing,
                 status, created_at, expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
             """,
             (
                 None,
@@ -1216,6 +1699,9 @@ class DwarfyDatabase:
                 asking_price,
                 broker_fee,
                 buyer_total,
+                commission_bps_locked,
+                seller_tier_key_at_listing,
+                seller_standing_gp_at_listing,
                 now,
                 expires_at,
             ),
@@ -1235,7 +1721,8 @@ class DwarfyDatabase:
             profit_change=0,
             notes=(
                 f"Classified posted by {seller_display_name} as "
-                f"{seller_character_name} at {asking_price}gp buyer price with {broker_fee}gp seller-paid commission."
+                f"{seller_character_name} at {asking_price}gp buyer price with {broker_fee}gp "
+                f"seller-paid commission locked at {commission_bps_locked} bps."
             ),
             commit=False,
         )
@@ -1304,7 +1791,7 @@ class DwarfyDatabase:
         buyer_character_name: str,
         buyer_character_level: int,
         trade_log_text: str,
-    ) -> bool:
+    ) -> dict[str, Any] | bool:
         classified = await self.get_classified(classified_id)
         if classified is None or classified["status"] != "open":
             return False
@@ -1352,8 +1839,15 @@ class DwarfyDatabase:
             notes=f"Seller-paid classified commission for {classified['item_name']}.",
             commit=False,
         )
+        standing_result = await self.award_classified_standing(
+            classified,
+            buyer_user_id=buyer_user_id,
+            buyer_character_name=buyer_character_name,
+        )
         await self.db.commit()
-        return True
+        sold = await self.get_classified(classified["classified_id"]) or {}
+        sold["_standing_result"] = standing_result
+        return sold
 
     async def return_expired_classified(self, classified_id: str) -> dict[str, Any] | None:
         """Mark an expired open classified as returned to the seller."""

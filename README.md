@@ -472,10 +472,11 @@ Useful commands:
 - `/dwarfy character action:Add or update` updates a saved character's level.
 - `/dwarfy character action:Set active` changes your active/default character.
 - `/dwarfy character action:Retire` hides an old character from autocomplete.
+- `/dwarfy character action:Standing` privately shows your Dwarfy Standing.
 
 Character fields on `/dwarfy sell`, `/dwarfy broker`, `/dwarfy buy`, `/dwarfy classified_post`, and `/dwarfy classified_buy` autocomplete your saved character names. Successful transactions also remember the submitted character name and level for future autocomplete.
 
-Registration does not check character sheets. It is only a convenience layer so logs, receipts, and future Dwarfy progress can consistently associate a Discord user with character names.
+Registration does not check character sheets. It is only a convenience layer so logs, receipts, and Dwarfy Standing can consistently associate a Discord user with character names.
 
 ## Buying From Dwarfy
 
@@ -503,13 +504,42 @@ Dwarfy Classifieds is a player-to-player board. Dwarfy does not own the item and
 
 Dwarfy takes custody of the item for 30 days from posting. During that hold, the seller cannot use, sell, trade, or withdraw the item. If nobody buys it within 30 days, the bot returns the item to the seller for free and posts a return notice in the classifieds channel.
 
-Dwarfy withholds a `20%` commission from the seller when the item sells. The buyer pays only the posted price:
+Dwarfy withholds a seller-paid commission when the item sells. The buyer pays only the posted price. The seller's commission rate is based on Dwarfy Standing and is locked when the classified is posted, so old listings do not change if the seller ranks up later.
 
 ```text
 Buyer price: 410gp
 Dwarfy commission: 82gp
 Seller receives: 328gp
 ```
+
+### Dwarfy Standing
+
+Dwarfy Standing rewards sellers who complete public classified sales. It is tracked by Discord user, not by individual character, but receipts still show the acting character.
+
+Standing only comes from completed classified sales where Dwarfy actually keeps commission. Direct sales, brokered sales, expired classifieds, voided classifieds, and Dwarfy's later resale profit do not count.
+
+Standing gain is equal to the commission Dwarfy kept from that classified sale:
+
+```text
+Buyer price: 1,000gp
+Locked commission: 20%
+Dwarfy commission: 200gp
+Seller receives: 800gp
+Dwarfy Standing gained: +200gp
+```
+
+Sales below `500gp` do not grant standing. A second credited sale between the same buyer/seller pair within 30 days grants 50% standing credit. A third or later credited sale between the same pair within 30 days grants 0 standing credit and creates a staff-review flag.
+
+Use `/dwarfy character action:Standing` to privately check your progress.
+
+| Tier | Required Commission | Sales | Unique Buyers | Classified Commission |
+| --- | ---: | ---: | ---: | ---: |
+| Counter Stranger | 0gp | 0 | 0 | 20% |
+| Copper Regular | 2,500gp | 3 | 2 | 17.5% |
+| Silver Ledgerhand | 10,000gp | 8 | 4 | 15% |
+| Gold Broker | 25,000gp | 15 | 7 | 12.5% |
+| Mithral Partner | 60,000gp | 30 | 12 | 10% |
+| Vault Partner | 125,000gp | 50 | 20 | 5% |
 
 `/dwarfy classified_browse` and `/dwarfy classified_inspect` are private. `/dwarfy classified_buy` is public and produces copyable trade-log text showing what the buyer pays and what Dwarfy withholds from the seller side.
 

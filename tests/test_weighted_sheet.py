@@ -2314,11 +2314,14 @@ class ClassifiedsTests(unittest.TestCase):
         self.assertEqual(parse_classified_id("DWC-17 - Bag of Holding"), "DWC-00017")
         self.assertEqual(parse_classified_id("`dwc 00042`"), "DWC-00042")
 
-    def test_classified_fee_is_seller_paid_twenty_percent(self):
-        from cogs.dwarfy import classified_fee_for_price
+    def test_classified_fee_uses_locked_basis_points(self):
+        from cogs.dwarfy import classified_fee_for_price, commission_bps_text
 
         self.assertEqual(classified_fee_for_price(410), 82)
+        self.assertEqual(classified_fee_for_price(1000, 1750), 175)
+        self.assertEqual(classified_fee_for_price(1000, 1250), 125)
         self.assertEqual(classified_fee_for_price(1), 0)
+        self.assertEqual(commission_bps_text(1750), "17.5%")
 
     def test_classified_trade_log_shows_seller_paid_commission(self):
         from cogs.dwarfy import build_classified_trade_log
@@ -2393,6 +2396,9 @@ class ClassifiedsTests(unittest.TestCase):
                         asking_price=410,
                         broker_fee=82,
                         buyer_total=410,
+                        commission_bps_locked=2000,
+                        seller_tier_key_at_listing="counter_stranger",
+                        seller_standing_gp_at_listing=0,
                     )
                     open_before = await db.list_open_classifieds()
                     sold = await db.mark_classified_sold(
@@ -2408,12 +2414,13 @@ class ClassifiedsTests(unittest.TestCase):
                         listing_id=row["classified_id"],
                         entry_type="classified_fee",
                     )
+                    standing = await db.get_user_standing("123")
                     exported = await db.export_table("classifieds")
                 finally:
                     await db.close()
-                return row, open_before, sold, fetched, history, exported
+                return row, open_before, sold, fetched, history, standing, exported
 
-        row, open_before, sold, fetched, history, exported = asyncio.run(run_case())
+        row, open_before, sold, fetched, history, standing, exported = asyncio.run(run_case())
 
         self.assertEqual(row["classified_id"], "DWC-00001")
         self.assertEqual([entry["classified_id"] for entry in open_before], ["DWC-00001"])
@@ -2424,7 +2431,59 @@ class ClassifiedsTests(unittest.TestCase):
         self.assertIsNone(fetched["returned_at"])
         self.assertEqual(history[0]["cash_change"], 82)
         self.assertEqual(history[0]["profit_change"], 82)
+        self.assertEqual(standing["lifetime_commission_gp"], 0)
+        self.assertEqual(sold["_standing_result"]["eligibility_status"], "below_minimum_price")
         self.assertEqual(exported[0]["trade_log_text"], "trade log")
+
+    def test_classified_standing_promotes_from_completed_commission_only(self):
+        from services.database import DwarfyDatabase
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as folder:
+                db = DwarfyDatabase(f"{folder}/dwarfy.sqlite")
+                await db.connect()
+                try:
+                    results = []
+                    for index, buyer_id in enumerate(("456", "789", "456"), start=1):
+                        row = await db.create_classified(
+                            item_name=f"Item {index}",
+                            item_clean_name=f"Item {index}",
+                            listing_display_name=f"Item {index}",
+                            rarity="Rare",
+                            source="DMG 2024",
+                            category="Wondrous Item",
+                            tags="test",
+                            seller_user_id="123",
+                            seller_display_name="Seller",
+                            seller_character_name="Beto Dread",
+                            seller_character_level=9,
+                            asking_price=5000,
+                            broker_fee=1000,
+                            buyer_total=5000,
+                        )
+                        result = await db.mark_classified_sold(
+                            classified_id=row["classified_id"],
+                            buyer_user_id=buyer_id,
+                            buyer_display_name=f"Buyer {buyer_id}",
+                            buyer_character_name=f"Buyer {buyer_id}",
+                            buyer_character_level=5,
+                            trade_log_text="trade log",
+                        )
+                        results.append(result["_standing_result"])
+                    standing = await db.get_user_standing("123")
+                finally:
+                    await db.close()
+                return results, standing
+
+        results, standing = asyncio.run(run_case())
+
+        self.assertEqual([result["standing_gain_gp"] for result in results], [1000, 1000, 500])
+        self.assertEqual(results[2]["eligibility_status"], "reduced_by_pair_limit")
+        self.assertEqual(standing["lifetime_commission_gp"], 2500)
+        self.assertEqual(standing["qualified_sales_count"], 3)
+        self.assertEqual(standing["unique_buyer_count"], 2)
+        self.assertEqual(standing["current_tier"]["display_name"], "Copper Regular")
+        self.assertEqual(standing["current_tier"]["commission_bps"], 1750)
 
     def test_expired_classified_is_returned_and_no_longer_buyable(self):
         from services.database import DwarfyDatabase
@@ -2711,8 +2770,19 @@ class HelpCommandTests(unittest.TestCase):
         text = "\n".join([embed.description or ""] + [field.value for field in embed.fields])
 
         self.assertIn("The price is what the buyer pays", text)
-        self.assertIn("withholds a 20% commission", text)
+        self.assertIn("locked Dwarfy Standing commission", text)
         self.assertIn("seller receives the buyer price minus", text.casefold())
+
+    def test_help_standing_explains_ladder(self):
+        from cogs.dwarfy import build_help_embed
+
+        embed = build_help_embed("standing")
+        text = "\n".join([embed.description or ""] + [field.value for field in embed.fields])
+
+        self.assertIn("completed classified sales", text.casefold())
+        self.assertIn("Counter Stranger", text)
+        self.assertIn("Copper Regular", text)
+        self.assertIn("/dwarfy character action:Standing", text)
 
     def test_help_characters_mentions_registry_commands(self):
         from cogs.dwarfy import build_help_embed
