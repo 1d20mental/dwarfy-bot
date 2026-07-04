@@ -44,6 +44,7 @@ TRUE_TEXT = {"true", "yes", "y", "1"}
 FALSE_TEXT = {"false", "no", "n", "0"}
 BASE_PRICE_COLUMNS = ("Base Price", "Base Cost", "Item Base Price", "Dwarfy Base Price")
 TIER_TEXT_RE = re.compile(r"\b(?:tier\s*)?t\s*([1-4])\b|\btier\s*([1-4])\b|^([1-4])$")
+SESSION_LOOT_BLOCKED_ITEM_NAMES = {"manifold tool"}
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,10 @@ class SheetItem:
             page_text = page if page.casefold().startswith("p") else f"p. {page}"
             return f"{self.source}, {page_text}"
         return self.source or "Unknown"
+
+
+def is_session_loot_blocked_item(item: SheetItem) -> bool:
+    return item.name.casefold().strip() in SESSION_LOOT_BLOCKED_ITEM_NAMES
 
 
 @dataclass(frozen=True)
@@ -1025,6 +1030,8 @@ class SheetCache:
         """Return session-eligible items matching roll rarity, slot type, and APL."""
         pool: list[SheetItem] = []
         for item in self.items:
+            if is_session_loot_blocked_item(item):
+                continue
             if not item.allowed:
                 continue
             if not item.session_eligible:
